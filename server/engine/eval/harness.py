@@ -61,6 +61,21 @@ def _inject_user(state: dict, text: str) -> dict:
     }
 
 
+def _interrupt(state: dict, text: str) -> dict:
+    """AI 발화 중 유저 개입 — 직전 AI 발화를 끊김 표시하고 유저 발화를 주입한다(§2.1)."""
+    messages = [dict(m) for m in state['messages']]
+    if messages and messages[-1]['speaker'] in ('ai_a', 'ai_b'):
+        messages[-1]['interrupted'] = True
+    messages.append({'speaker': 'user', 'text': text, 'ts': 0.0, 'interrupted': False})
+    return {
+        **state,
+        'messages': messages,
+        'current_speaker': 'user',
+        'consecutive_ai_turns': 0,
+        'last_user_turn_ts': 0.0,
+    }
+
+
 def run_scenario(
     steps: list[dict],
     utterance_client,
@@ -74,6 +89,8 @@ def run_scenario(
     for step in steps:
         if step['type'] == 'user':
             state = _inject_user(state, step['text'])
+        elif step['type'] == 'interrupt':
+            state = _interrupt(state, step['text'])
         else:
             state = graph.invoke(state)
 

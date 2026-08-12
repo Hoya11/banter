@@ -29,3 +29,12 @@ scenarios:
       - type: ai
       - type: ai
       - type: ai
+  - id: barge_in
+    desc: 유저가 AI 발화 중 끼어듦 — 발화권 양보·수습(§2.1)
+    steps:
+      - type: ai
+      - type: ai
+      - type: interrupt
+        text: 아니 잠깐, 그 얘기 말고
+      - type: ai
+      - type: ai

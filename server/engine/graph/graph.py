@@ -51,10 +51,14 @@ def _speaker_label(speaker: str) -> str:
 
 
 def _render_history(messages: list) -> str:
-    """대화 이력을 '이름: 발화' 형태의 user 프롬프트로 렌더한다."""
+    """대화 이력을 '이름: 발화' 형태의 user 프롬프트로 렌더한다 (끊긴 발화는 표시)."""
     if not messages:
         return '대화를 시작해줘. 가볍게 인사하거나 오늘 있었던 얘기로 자연스럽게 시작해.'
-    return '\n'.join(f'{_speaker_label(m["speaker"])}: {m["text"]}' for m in messages)
+    lines = []
+    for m in messages:
+        text = m['text'] + (' [말하다 끊김]' if m.get('interrupted') else '')
+        lines.append(f'{_speaker_label(m["speaker"])}: {text}')
+    return '\n'.join(lines)
 
 
 def _strip_speaker_prefix(text: str, name: str) -> str:

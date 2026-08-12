@@ -24,13 +24,18 @@ def build_supervisor_prompt(state: ConvState) -> tuple[str, str]:
     personas = load_personas()
     roster = '\n'.join(f'- {k}: {p.name}, {p.stance}' for k, p in personas.items())
     history = (
-        '\n'.join(f'{m["speaker"]}: {m["text"]}' for m in state['messages'])
+        '\n'.join(
+            f'{m["speaker"]}: {m["text"]}' + (' [말하다 끊김]' if m.get('interrupted') else '')
+            for m in state['messages']
+        )
         or '(아직 발화 없음)'
     )
     system = (
         '너는 3자 수다(유저 1명 + AI 2명)의 진행 감독이다. 다음에 누가 어떤 의도로 말할지 정해라.\n'
         f'AI 로스터:\n{roster}\n'
         '직전 화자가 연속으로 말하지 않게 하고, 대화가 동의만 반복되면 반박·화제 전환 의도를 넣어라.\n'
+        '직전 발화가 [말하다 끊김]이고 유저가 끼어들었으면, 끊긴 화자가 자연스럽게 양보하고 '
+        '유저 발화에 반응하도록 화자·의도를 정해라(매번 사과하지 말 것).\n'
         '출력은 JSON만: {"next_speaker": "ai_a"|"ai_b", "intent": "이번 발화의 짧은 의도(한국어)"}'
     )
     user = f'대화 이력:\n{history}\n\n다음 화자와 의도를 정해라.'

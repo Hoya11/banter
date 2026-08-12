@@ -4,7 +4,7 @@ fake client로 '대화 생성 → 채점 → go 판정' 흐름이 이어지는�
 (LLM 답변 품질이 아니라 파이프 연결을 본다).
 """
 
-from engine.eval.harness import load_scenarios, run_pilot, run_scenario
+from engine.eval.harness import _interrupt, load_scenarios, run_pilot, run_scenario
 from engine.eval.judge import load_rubric
 
 
@@ -47,6 +47,23 @@ def test_scenarios_yaml_loads_and_is_wellformed():
     for sc in scenarios:
         assert sc['steps']
         for step in sc['steps']:
-            assert step['type'] in ('ai', 'user')
-            if step['type'] == 'user':
-                assert step.get('text')  # 유저 step엔 발화 텍스트 필수
+            assert step['type'] in ('ai', 'user', 'interrupt')
+            if step['type'] in ('user', 'interrupt'):
+                assert step.get('text')  # 유저/개입 step엔 발화 텍스트 필수
+
+
+def test_interrupt_marks_previous_ai_and_injects_user():
+    state = {'messages': [{'speaker': 'ai_a', 'text': '내 말은', 'ts': 0.0, 'interrupted': False}]}
+    out = _interrupt(state, '잠깐만')
+    assert out['messages'][0]['interrupted'] is True  # 직전 AI 발화가 끊김 표시됨
+    assert out['messages'][-1]['speaker'] == 'user'
+    assert out['messages'][-1]['text'] == '잠깐만'
+    assert out['current_speaker'] == 'user'
+    assert out['consecutive_ai_turns'] == 0
+
+
+def test_run_scenario_handles_interrupt():
+    steps = [{'type': 'ai'}, {'type': 'interrupt', 'text': '잠깐만'}, {'type': 'ai'}]
+    transcript, result, _ = run_scenario(steps, FakeUtterance(), FakeJudge())
+    assert any(t.speaker == 'user' and t.text == '잠깐만' for t in transcript)
+    assert set(result.scores) == {it['key'] for it in load_rubric()['items']}
