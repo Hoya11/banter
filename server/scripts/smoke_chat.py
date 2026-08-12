@@ -15,7 +15,8 @@ load_dotenv()
 
 def main() -> None:
     client = OpenAIClient(temperature=0.9)  # 발화는 다양성 위해 temp 높게
-    graph = build_graph(client)
+    supervisor = OpenAIClient(json_mode=True)  # 화자 선정: 맥락 기반(§1.3)
+    graph = build_graph(client, supervisor)
     state = initial_state()
     for _ in range(4):
         state = graph.invoke(state)

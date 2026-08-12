@@ -15,8 +15,11 @@ load_dotenv()
 def main() -> None:
     utterance = OpenAIClient(temperature=0.9)  # 발화: 다양성
     judge_client = OpenAIClient(json_mode=True)  # 채점: JSON + temp0(재현성)
+    supervisor = OpenAIClient(json_mode=True)  # 화자 선정: 맥락 기반(§1.3)
 
-    transcript, result, go = run_pilot(utterance, judge_client, turns=6)
+    transcript, result, go = run_pilot(
+        utterance, judge_client, turns=6, supervisor_client=supervisor
+    )
 
     print('=== 대화 ===')
     for turn in transcript:

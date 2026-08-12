@@ -37,6 +37,7 @@ class ConvState(TypedDict):
     current_speaker: Speaker | None
     consecutive_ai_turns: int  # AI 연속 발화 카운터 (유저 소외 방지)
     last_user_turn_ts: float | None
+    current_intent: str | None  # supervisor가 정한 이번 발화 의도 (§1.3)
     # personas — key: 'ai_a' | 'ai_b'
     personas: dict[str, PersonaState]
     # control
@@ -53,6 +54,7 @@ def initial_state() -> ConvState:
         'current_speaker': None,
         'consecutive_ai_turns': 0,
         'last_user_turn_ts': None,
+        'current_intent': None,
         'personas': {
             'ai_a': {'speak_count': 0, 'last_stance': ''},
             'ai_b': {'speak_count': 0, 'last_stance': ''},

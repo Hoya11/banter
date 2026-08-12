@@ -23,9 +23,10 @@ def run_pilot(
     judge_client,
     turns: int = 6,
     rubric_version: str = 'v1',
+    supervisor_client=None,
 ) -> tuple[list[Turn], JudgeResult, bool]:
     """N턴 라디오 모드 대화를 만들고 judge로 채점해 (transcript, result, go)를 반환한다."""
-    graph = build_graph(utterance_client)
+    graph = build_graph(utterance_client, supervisor_client)
     state = initial_state()
     for _ in range(turns):
         state = graph.invoke(state)
@@ -65,9 +66,10 @@ def run_scenario(
     utterance_client,
     judge_client,
     rubric_version: str = 'v1',
+    supervisor_client=None,
 ) -> tuple[list[Turn], JudgeResult, bool]:
     """시나리오 step(ai/user)을 순서대로 실행하고 전체 대화를 채점한다."""
-    graph = build_graph(utterance_client)
+    graph = build_graph(utterance_client, supervisor_client)
     state = initial_state()
     for step in steps:
         if step['type'] == 'user':
@@ -83,12 +85,15 @@ def run_scenario(
     return transcript, result, is_go(result)
 
 
-def run_scenario_set(utterance_client, judge_client) -> list[dict]:
+def run_scenario_set(utterance_client, judge_client, supervisor_client=None) -> list[dict]:
     """시나리오 셋 전체를 채점해 시나리오별 결과를 반환한다."""
     out = []
     for scenario in load_scenarios():
         transcript, result, go = run_scenario(
-            scenario['steps'], utterance_client, judge_client
+            scenario['steps'],
+            utterance_client,
+            judge_client,
+            supervisor_client=supervisor_client,
         )
         out.append({'id': scenario['id'], 'result': result, 'go': go})
     return out

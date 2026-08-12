@@ -15,8 +15,9 @@ load_dotenv()
 def main() -> None:
     utterance = OpenAIClient(temperature=0.9)
     judge_client = OpenAIClient(json_mode=True)
+    supervisor = OpenAIClient(json_mode=True)  # 화자 선정: 맥락 기반(§1.3)
 
-    results = run_scenario_set(utterance, judge_client)
+    results = run_scenario_set(utterance, judge_client, supervisor_client=supervisor)
     all_scores = []
     for r in results:
         scores = r['result'].scores
