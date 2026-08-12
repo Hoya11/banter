@@ -10,6 +10,9 @@ from langgraph.graph import END, START, StateGraph
 from ..personas.loader import build_persona_prompt, get_persona
 from .state import ConvState
 
+# AI가 이 턴 수만큼 이어갈 때마다 유저를 대화로 소환한다 (§1.3, 초안 튜닝 변수)
+SUMMON_THRESHOLD = 3
+
 
 def select_speaker(state: ConvState) -> dict:
     """다음 화자를 정한다 — 규칙 가드(§1.3)를 항상 적용.
@@ -40,7 +43,10 @@ def generate_utterance(state: ConvState, client=None) -> dict:
         persona = get_persona(speaker)
         others = [k for k in ('ai_a', 'ai_b') if k != speaker]
         other_name = get_persona(others[0]).name if others else ''
-        system = build_persona_prompt(persona, other_name)
+        # AI가 SUMMON_THRESHOLD 턴마다 유저를 소환 (밀도 제한 — 매번 부르면 귀찮음)
+        consec = state['consecutive_ai_turns']
+        summon = consec > 0 and consec % SUMMON_THRESHOLD == 0
+        system = build_persona_prompt(persona, other_name, summon_user=summon)
         text = client.complete(system, _render_history(state['messages']))
         text = _strip_speaker_prefix(text, persona.name)
     msg = {'speaker': speaker, 'text': text, 'ts': 0.0, 'interrupted': False}

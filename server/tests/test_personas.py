@@ -30,3 +30,12 @@ def test_prompt_carries_identity():
     prompt = build_persona_prompt(persona, other_name='소은')
     assert persona.name in prompt  # 자기 이름
     assert '소은' in prompt  # 상대 이름
+
+
+def test_summon_flag_adds_user_call():
+    # summon_user=True일 때만 유저 소환 지시가 붙는다 (§1.3)
+    persona = get_persona('ai_a')
+    summoned = build_persona_prompt(persona, '소은', summon_user=True)
+    normal = build_persona_prompt(persona, '소은', summon_user=False)
+    assert '끌어들여' in summoned
+    assert '끌어들여' not in normal

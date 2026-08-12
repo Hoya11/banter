@@ -28,12 +28,15 @@ def get_persona(speaker: str) -> Persona:
     return personas[speaker]
 
 
-def build_persona_prompt(persona: Persona, other_name: str) -> str:
+def build_persona_prompt(
+    persona: Persona, other_name: str, summon_user: bool = False
+) -> str:
     """페르소나로 발화 생성용 system 프롬프트를 만든다.
 
-    발화 길이 상한(1~3문장)으로 §1.4 '연설화'를 프롬프트에서 1차 제어한다.
+    발화 길이 상한(1~2문장)으로 §1.4 '연설화'를 프롬프트에서 1차 제어한다.
+    summon_user=True면 유저를 대화로 끌어들이도록 지시한다(§1.3 유저 소환, 소외 방지).
     """
-    return (
+    prompt = (
         f'너는 "{persona.name}". {persona.stance}.\n'
         f'말투: {persona.speech_style}.\n'
         f'관심사: {", ".join(persona.topic_bias)}.\n'
@@ -43,3 +46,6 @@ def build_persona_prompt(persona: Persona, other_name: str) -> str:
         '네 발화 내용만 출력해라 — "이름:" 같은 화자 표시를 앞에 붙이지 마라.\n'
         '이모지는 쓰지 마라 (음성으로 읽을 대사다).'
     )
+    if summon_user:
+        prompt += '\n지금은 유저(사람)에게 오늘 어땠는지 가볍게 말을 걸어 대화에 끌어들여라.'
+    return prompt
