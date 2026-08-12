@@ -1,0 +1,31 @@
+# 평가 시나리오 셋 v1 (엔진설계 §4.1)
+# 각 케이스는 step 시퀀스 — type: ai(엔진이 발화 생성) | user(스크립트된 유저 발화)
+# 유저 발화가 포함돼야 user_inclusion·개입 대응을 실제로 측정할 수 있다.
+# 끼어들기(§2.1) 케이스는 유저 개입 노드 구현 후 추가.
+scenarios:
+  - id: user_participates
+    desc: 유저가 대화에 참여 — 소외(user_inclusion) 측정
+    steps:
+      - type: ai
+      - type: user
+        text: 나 오늘 진짜 힘들었어
+      - type: ai
+      - type: ai
+      - type: user
+        text: 그래서 그냥 집 가서 눕고 싶더라
+      - type: ai
+  - id: topic_switch
+    desc: 유저 화제 전환 수용
+    steps:
+      - type: ai
+      - type: user
+        text: 아 맞다 너네 그 드라마 봤어?
+      - type: ai
+      - type: ai
+  - id: radio_silence
+    desc: 유저 침묵 — AI끼리 진행(라디오 모드)
+    steps:
+      - type: ai
+      - type: ai
+      - type: ai
+      - type: ai

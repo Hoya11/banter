@@ -4,7 +4,7 @@ fake client로 '대화 생성 → 채점 → go 판정' 흐름이 이어지는�
 (LLM 답변 품질이 아니라 파이프 연결을 본다).
 """
 
-from engine.eval.harness import run_pilot
+from engine.eval.harness import load_scenarios, run_pilot, run_scenario
 from engine.eval.judge import load_rubric
 
 
@@ -30,3 +30,23 @@ def test_run_pilot_produces_scored_transcript():
     assert set(result.scores) == {it['key'] for it in load_rubric()['items']}
     # 8점 균일 → go 컷 통과
     assert go is True
+
+
+def test_run_scenario_includes_user_utterance():
+    # ai → user(주입) → ai 순서면 대화에 유저 발화가 실제로 들어간다
+    steps = [{'type': 'ai'}, {'type': 'user', 'text': '안녕'}, {'type': 'ai'}]
+    transcript, result, go = run_scenario(steps, FakeUtterance(), FakeJudge())
+    assert any(t.speaker == 'user' and t.text == '안녕' for t in transcript)
+    assert set(result.scores) == {it['key'] for it in load_rubric()['items']}
+
+
+def test_scenarios_yaml_loads_and_is_wellformed():
+    # 실제 scenarios.yaml을 파싱·검증한다 (파일 문법 오류를 잡는 관문)
+    scenarios = load_scenarios()
+    assert len(scenarios) >= 1
+    for sc in scenarios:
+        assert sc['steps']
+        for step in sc['steps']:
+            assert step['type'] in ('ai', 'user')
+            if step['type'] == 'user':
+                assert step.get('text')  # 유저 step엔 발화 텍스트 필수
