@@ -1,0 +1,31 @@
+# 환경변수·시크릿 (공개 전환 대비 — 절대 커밋 금지)
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+secrets/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# Node / web
+node_modules/
+.next/
+dist/
+build/
+.turbo/
+
+# 커버리지·로그
+coverage/
+*.log
+
+# OS·에디터
+.DS_Store
+.idea/
+.vscode/

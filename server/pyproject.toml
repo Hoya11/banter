@@ -1,0 +1,6 @@
+[project]
+name = "banter-server"
+version = "0.1.0"
+description = "banter 3자 음성 수다 백엔드 — API + 3자 오케스트레이터(LangGraph)"
+requires-python = ">=3.13"
+dependencies = []
