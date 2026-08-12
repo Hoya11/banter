@@ -65,3 +65,14 @@ def test_generate_uses_injected_client():
     result = g.invoke(_state(None))
     assert result['messages'][0]['text'] == '오늘 진짜 피곤하다'
     assert result['messages'][0]['speaker'] == 'ai_a'
+
+
+def test_generate_strips_speaker_prefix():
+    # LLM이 '도현: ...'처럼 이름표를 붙여도 제거된다 (ai_a=도현)
+    class PrefixClient:
+        def complete(self, system: str, user: str) -> str:
+            return '도현: 오늘 피곤하다'
+
+    g = build_graph(PrefixClient())
+    result = g.invoke(_state(None))
+    assert result['messages'][0]['text'] == '오늘 피곤하다'

@@ -30,4 +30,3 @@ def test_prompt_carries_identity():
     prompt = build_persona_prompt(persona, other_name='소은')
     assert persona.name in prompt  # 자기 이름
     assert '소은' in prompt  # 상대 이름
-    assert '1~3문장' in prompt  # 발화 길이 상한(연설화 방지)

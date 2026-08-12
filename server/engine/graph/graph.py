@@ -42,8 +42,18 @@ def generate_utterance(state: ConvState, client=None) -> dict:
         other_name = get_persona(others[0]).name if others else ''
         system = build_persona_prompt(persona, other_name)
         text = client.complete(system, _render_history(state['messages']))
+        text = _strip_speaker_prefix(text, persona.name)
     msg = {'speaker': speaker, 'text': text, 'ts': 0.0, 'interrupted': False}
     return {'messages': [msg]}
+
+
+def _strip_speaker_prefix(text: str, name: str) -> str:
+    """LLM이 발화 앞에 붙인 '이름:' 화자 표시를 방어적으로 제거한다."""
+    stripped = text.lstrip()
+    for prefix in (f'{name}:', f'{name} :'):
+        if stripped.startswith(prefix):
+            return stripped[len(prefix):].strip()
+    return text
 
 
 def _speaker_label(speaker: str) -> str:
