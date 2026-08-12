@@ -26,7 +26,7 @@ CONVO = [
 
 def main() -> None:
     sink = get_sink()
-    result = judge(CONVO, OpenAIClient())
+    result = judge(CONVO, OpenAIClient(json_mode=True))
     sink.record_judge(CONVO, result, {'rubric_version': 'v1', 'source': 'smoke'})
     for key, item in result.scores.items():
         print(f'{key}: {item.score} — {item.reason}')

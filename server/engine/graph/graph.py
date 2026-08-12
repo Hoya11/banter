@@ -7,6 +7,7 @@ Phase 1 골격: 발화 생성은 스텁(LLM은 C단계), 화자 선정은 규칙
 
 from langgraph.graph import END, START, StateGraph
 
+from ..personas.loader import build_persona_prompt, get_persona
 from .state import ConvState
 
 
@@ -27,11 +28,33 @@ def select_speaker(state: ConvState) -> dict:
     return {'current_speaker': nxt, 'consecutive_ai_turns': consecutive}
 
 
-def generate_utterance(state: ConvState) -> dict:
-    """현재 화자의 발화를 생성한다 (Phase 1 스텁 — 실제 LLM 발화는 C단계)."""
+def generate_utterance(state: ConvState, client=None) -> dict:
+    """현재 화자의 발화를 생성한다.
+
+    client가 없으면 스텁(배관 테스트용), 있으면 페르소나 프롬프트 + 대화 이력으로 LLM 발화.
+    """
     speaker = state['current_speaker']
-    msg = {'speaker': speaker, 'text': f'({speaker} 발화 스텁)', 'ts': 0.0, 'interrupted': False}
+    if client is None:
+        text = f'({speaker} 발화 스텁)'
+    else:
+        persona = get_persona(speaker)
+        others = [k for k in ('ai_a', 'ai_b') if k != speaker]
+        other_name = get_persona(others[0]).name if others else ''
+        system = build_persona_prompt(persona, other_name)
+        text = client.complete(system, _render_history(state['messages']))
+    msg = {'speaker': speaker, 'text': text, 'ts': 0.0, 'interrupted': False}
     return {'messages': [msg]}
+
+
+def _speaker_label(speaker: str) -> str:
+    return '유저' if speaker == 'user' else get_persona(speaker).name
+
+
+def _render_history(messages: list) -> str:
+    """대화 이력을 '이름: 발화' 형태의 user 프롬프트로 렌더한다."""
+    if not messages:
+        return '대화를 시작해줘. 가볍게 인사하거나 오늘 있었던 얘기로 자연스럽게 시작해.'
+    return '\n'.join(f'{_speaker_label(m["speaker"])}: {m["text"]}' for m in messages)
 
 
 def update_state(state: ConvState) -> dict:
@@ -43,11 +66,18 @@ def update_state(state: ConvState) -> dict:
     return {'personas': personas}
 
 
-def build_graph():
-    """노드 그래프를 조립해 compile한다."""
+def build_graph(utterance_client=None):
+    """노드 그래프를 조립해 compile한다.
+
+    utterance_client가 없으면 발화는 스텁, 있으면 LLM으로 생성한다.
+    """
+
+    def generate(state: ConvState) -> dict:
+        return generate_utterance(state, utterance_client)
+
     g = StateGraph(ConvState)
     g.add_node('select_speaker', select_speaker)
-    g.add_node('generate', generate_utterance)
+    g.add_node('generate', generate)
     g.add_node('update', update_state)
     g.add_edge(START, 'select_speaker')
     g.add_edge('select_speaker', 'generate')

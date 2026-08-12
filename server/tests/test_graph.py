@@ -53,3 +53,15 @@ def test_graph_one_pass():
     assert len(result['messages']) == 1
     assert result['messages'][0]['speaker'] == 'ai_a'
     assert result['personas']['ai_a']['speak_count'] == 1
+
+
+def test_generate_uses_injected_client():
+    # client를 주입하면 그 발화가 messages에 실린다 (배관 검증, LLM 답변 문구 검증 아님)
+    class FakeUtteranceClient:
+        def complete(self, system: str, user: str) -> str:
+            return '오늘 진짜 피곤하다'
+
+    g = build_graph(FakeUtteranceClient())
+    result = g.invoke(_state(None))
+    assert result['messages'][0]['text'] == '오늘 진짜 피곤하다'
+    assert result['messages'][0]['speaker'] == 'ai_a'

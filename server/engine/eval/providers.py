@@ -17,21 +17,32 @@ class OpenAIClient:
     temperature=0으로 채점 재현성을 확보한다.
     """
 
-    def __init__(self, model: str = 'gpt-4o-mini', api_key: str | None = None):
+    def __init__(
+        self,
+        model: str = 'gpt-4o-mini',
+        api_key: str | None = None,
+        json_mode: bool = False,
+        temperature: float = 0.0,
+    ):
         key = api_key or os.environ.get('OPENAI_API_KEY')
         if not key:
             raise RuntimeError('OPENAI_API_KEY가 없다 — server/.env에 설정하라')
         self._client = OpenAI(api_key=key)
         self._model = model
+        self._json = json_mode  # judge=True(순수 JSON), 발화=False(자유 텍스트)
+        self._temperature = temperature  # judge=0(재현성), 발화=높게(다양성)
 
     def complete(self, system: str, user: str) -> str:
+        kwargs = {}
+        if self._json:
+            kwargs['response_format'] = {'type': 'json_object'}  # 순수 JSON 강제
         resp = self._client.chat.completions.create(
             model=self._model,
             messages=[
                 {'role': 'system', 'content': system},
                 {'role': 'user', 'content': user},
             ],
-            response_format={'type': 'json_object'},  # 순수 JSON 강제
-            temperature=0,  # 채점 재현성
+            temperature=self._temperature,
+            **kwargs,
         )
         return resp.choices[0].message.content or ''

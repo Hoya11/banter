@@ -1,0 +1,33 @@
+"""페르소나 로딩·프롬프트 구성의 결정적 계약 테스트.
+
+대비형 듀오(D-007)의 두 스탠스가 실제로 달라야 하고(케미 전제),
+프롬프트에 페르소나 정체성이 실려야 한다.
+"""
+
+import pytest
+
+from engine.personas.loader import build_persona_prompt, get_persona, load_personas
+
+
+def test_loads_duo():
+    personas = load_personas()
+    assert set(personas) == {'ai_a', 'ai_b'}
+
+
+def test_stances_contrast():
+    # 대비형 전제 — 두 스탠스가 같으면 루프 방지 설계가 무너진다
+    personas = load_personas()
+    assert personas['ai_a'].stance != personas['ai_b'].stance
+
+
+def test_get_persona_unknown_raises():
+    with pytest.raises(ValueError):
+        get_persona('ai_c')
+
+
+def test_prompt_carries_identity():
+    persona = get_persona('ai_a')
+    prompt = build_persona_prompt(persona, other_name='소은')
+    assert persona.name in prompt  # 자기 이름
+    assert '소은' in prompt  # 상대 이름
+    assert '1~3문장' in prompt  # 발화 길이 상한(연설화 방지)
