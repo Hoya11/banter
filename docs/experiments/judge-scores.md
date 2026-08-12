@@ -27,3 +27,18 @@ judge 모델: gpt-4o-mini / 발화: gpt-4o-mini(temp 0.9) / go 컷: 평균 ≥7.
 - 끼어들기(§2.1) 케이스 추가 — context_on_interrupt를 실제 개입으로 측정.
 - 라디오 모드 user_inclusion 평가 정교화.
 - 소은 캐릭터 깊이(단순 긍정 → 위트) 튜닝 후 재측정.
+
+## 2026-08-13 — supervisor v1 도입 (기계적 교대 → 맥락 기반 화자 선정, D-003)
+
+| 시나리오 | 판정 | 평균 | 이전(기계적) | user_incl | liveliness |
+|---|---|---|---|---|---|
+| user_participates | GO | 8.2 | 7.8 ↑ | 9 (was 7) | 8 |
+| topic_switch | GO | 7.6 | 7.6 = | 6 | 8 |
+| radio_silence | NO-GO | 7.0 | 7.4 ↓ | 5 | 6 (was 8) |
+| **전체** | | **7.60** | 7.60 = | | |
+
+### 관찰
+- supervisor는 **유저 참여 시 값을 한다** — user_participates user_inclusion 7→9, 평균 7.8→8.2. 유저 발화 맥락을 반영한 화자 선정.
+- **라디오 모드는 하락** — supervisor가 도현 냉소·화제 정체를 심화(liveliness 8→6). AI끼리 무한 대화엔 화제 관리(topic_stack)가 필요.
+- **전체 평균은 동일(7.60)이지만 시나리오별로 갈림** — 단일 지표만 보면 "효과 없음"이나, 세분하면 "유저 상호작용 개선 + 라디오 부작용" 트레이드오프. 평균의 함정을 시나리오 셋이 드러냄.
+- 비용: supervisor는 AI 턴마다 LLM 호출 +1 (D-003 v2 통합 생성으로 최적화 대상).
