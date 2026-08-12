@@ -1,0 +1,26 @@
+# banter judge 루브릭 v1 — 채점 기준의 단일 소스 (엔진설계 §4.1, D-005)
+# 코드가 아닌 설정으로 분리한다. 심판을 단일→앙상블로 바꿔도 이 파일은 불변 = "인터페이스".
+# 항목 key는 judge 출력(JudgeResult.scores)의 key와 1:1로 일치해야 한다.
+version: v1
+scale: [0, 10] # 각 항목 점수 범위 (정수)
+items:
+  - key: turn_taking
+    label: turn-taking 적절성
+    description: 화자 교대가 자연스러운가 (연속발화·발화권 뺏김 없음)
+    watches: ['§1.3 연속발화 가드', '§1.4 연설화']
+  - key: persona_consistency
+    label: 페르소나 일관성
+    description: 두 AI의 대비된 스탠스가 대화 내내 유지되나
+    watches: ['캐릭터 스탠스 붕괴']
+  - key: context_on_interrupt
+    label: 개입 시 맥락 유지
+    description: 유저 끼어들기·화제전환에 자연스럽게 반응·연결하나
+    watches: ['§2.1 수습 실패', '§1.4 화제 급발진']
+  - key: liveliness
+    label: 대화 생동감
+    description: 동의 반복·단조로움 없이 티키타카가 사나
+    watches: ['§1.4 루프']
+  - key: user_inclusion
+    label: 유저 포함도
+    description: 유저를 대화에 끌어들이나 (둘만 신나지 않음)
+    watches: ['§1.4 소외']

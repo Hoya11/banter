@@ -1,0 +1,72 @@
+"""단일 judge (D-005).
+
+LLM provider를 주입받아 대화를 루브릭으로 채점한다.
+단일→앙상블 전환 시 judge() 시그니처와 rubric/schema 계약은 불변 —
+바뀌는 건 주입되는 LLMClient 구현뿐이다.
+"""
+
+from pathlib import Path
+from typing import Protocol
+
+import yaml
+
+from .schema import JudgeResult, Turn
+
+RUBRIC_PATH = Path(__file__).parent / 'rubric.yaml'
+
+
+def load_rubric(version: str = 'v1') -> dict:
+    """rubric.yaml 로드. 필수 키 부재·버전 불일치 시 에러."""
+    data = yaml.safe_load(RUBRIC_PATH.read_text(encoding='utf-8'))
+    if not data or not {'version', 'scale', 'items'} <= set(data):
+        raise ValueError('rubric.yaml에 필수 키(version/scale/items)가 없다')
+    if data['version'] != version:
+        raise ValueError(f'루브릭 버전 불일치: 요청={version}, 파일={data["version"]}')
+    return data
+
+
+class LLMClient(Protocol):
+    """judge가 쓰는 LLM 호출 계약. 실제 구현(OpenAI/Anthropic 등)은 LLM 선택 후 주입."""
+
+    def complete(self, system: str, user: str) -> str:
+        """system·user 프롬프트로 채점 결과 JSON 문자열을 반환한다."""
+        ...
+
+
+def build_prompt(rubric: dict, transcript: list[Turn]) -> tuple[str, str]:
+    """루브릭과 대화로 (system, user) 프롬프트를 구성한다."""
+    items = '\n'.join(
+        f'- {it["key"]}: {it["label"]} — {it["description"]}' for it in rubric['items']
+    )
+    lo, hi = rubric['scale']
+    system = (
+        '너는 3자 수다(유저 1명 + AI 2명) 대화의 품질을 채점하는 평가자다.\n'
+        f'각 항목을 {lo}~{hi} 정수로 채점하고 근거를 한국어로 짧게 남겨라.\n'
+        f'채점 항목:\n{items}\n'
+        '출력은 아래 JSON만 반환한다:\n'
+        '{"scores": {"<key>": {"score": int, "reason": str}, ...}, "overall_comment": str}'
+    )
+    convo = '\n'.join(f'{t.speaker}: {t.text}' for t in transcript)
+    user = f'다음 대화를 채점하라:\n{convo}'
+    return system, user
+
+
+def judge(
+    transcript: list[Turn], client: LLMClient, rubric_version: str = 'v1'
+) -> JudgeResult:
+    """대화를 루브릭으로 채점한다 (단일 심판).
+
+    채점 결과가 루브릭 항목과 정확히 일치하지 않으면(누락·오타 key) 예외 —
+    is_go가 잘못된 항목 집합으로 판정하는 것을 막는다.
+    """
+    rubric = load_rubric(rubric_version)
+    system, user = build_prompt(rubric, transcript)
+    raw = client.complete(system, user)
+    # TODO(LLM 배선 시): raw가 코드펜스·설명 텍스트로 감싸일 수 있음 — JSON 추출/파싱 실패 처리 추가
+    result = JudgeResult.model_validate_json(raw)
+    expected = {it['key'] for it in rubric['items']}
+    if set(result.scores) != expected:
+        raise ValueError(
+            f'채점 항목 불일치: 기대={sorted(expected)}, 실제={sorted(result.scores)}'
+        )
+    return result
