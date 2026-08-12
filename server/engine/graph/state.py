@@ -43,3 +43,21 @@ class ConvState(TypedDict):
     pending_user_input: str | None  # 생성 중 도착한 유저 개입 버퍼
     session_elapsed: float
     budget_used: float
+
+
+def initial_state() -> ConvState:
+    """빈 대화의 초기 상태 (도현/소은 듀오)."""
+    return {
+        'messages': [],
+        'topic_stack': [],
+        'current_speaker': None,
+        'consecutive_ai_turns': 0,
+        'last_user_turn_ts': None,
+        'personas': {
+            'ai_a': {'speak_count': 0, 'last_stance': ''},
+            'ai_b': {'speak_count': 0, 'last_stance': ''},
+        },
+        'pending_user_input': None,
+        'session_elapsed': 0.0,
+        'budget_used': 0.0,
+    }
