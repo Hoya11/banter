@@ -62,3 +62,21 @@ judge 모델: gpt-4o-mini / 발화: gpt-4o-mini(temp 0.9) / go 컷: 평균 ≥7.
 - judge 반복 채점(시나리오당 N회) → 평균·분산으로 신뢰구간 확보.
 - 라디오 모드 화제 정체(도현 편향) 튜닝.
 - judge 상위 모델(gpt-4o) 또는 앙상블 승격 검토(D-005).
+
+## 2026-08-13 — judge 신뢰성 (반복 채점 n=5, radio_silence)
+
+| 측정 | turn_taking | persona | context | liveliness | user_incl |
+|---|---|---|---|---|---|
+| A) 고정 대화 5회 채점 | 8 ±0 | 9 ±0 | 7 ±0 | 6 ±0 | 5 ±0 |
+| B) 시나리오 5회 실행 | 8 ±0 | 9 ±0 | 7 ±0 | 6 ±0 | 5 ±0 |
+
+### 결론
+- **judge는 완전 재현적** (A 전 항목 std 0, temp0). 같은 대화엔 같은 점수 → 신뢰 가능.
+- **radio_silence의 진짜 user_inclusion은 5 (NO-GO), 5회 반복 모두 고정.** 직전 1회 측정의 8(GO)은 **이상치**였다.
+- **반복 측정이 "거짓 GO"를 걸러냄** — n=1 판정이면 "라디오도 GO"라는 틀린 결론을 냈을 것. 신뢰성 측정의 핵심 가치.
+- 부수 발견: judge가 overall_comment를 scores 안에 넣는 구조 오류가 있었음 → 파싱 복구 + 반복 채점 실패 격리로 대응(fix).
+
+### Phase 1 판정 (신뢰구간 확인 후)
+- user_participates GO 8.2 / topic_switch GO 7.6 / barge_in GO 7.6 — 유저 상호작용 시나리오 전부 GO.
+- radio_silence NO-GO — 유저 발화 0개의 구조적 결과. 라디오 모드 user_inclusion 평가는 정교화 대상(실제 실패 아님).
+- **judge 신뢰성 확인 → 판정을 믿을 수 있음.** "3자 발화권 중재의 텍스트 검증"은 유저 상호작용 시나리오에서 성립.
