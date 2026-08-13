@@ -7,6 +7,7 @@
 from dotenv import load_dotenv
 
 from api.app import create_app
+from engine.eval.elevenlabs import ElevenLabsClient
 from engine.eval.providers import OpenAIClient
 
 load_dotenv()
@@ -14,5 +15,8 @@ load_dotenv()
 app = create_app(
     utterance_client=OpenAIClient(model='gpt-5.6-luna', temperature=None),  # 발화 생성(temp 고정 모델)
     supervisor_client=OpenAIClient(json_mode=True),  # 화자 선정(gpt-4o-mini, 비용 절약)
-    tts_client=OpenAIClient(),  # 발화 → 화자 voice로 음성 합성
+    # TTS provider 선택 — 개발 기본은 끔(텍스트만, 크레딧 0). 데모/청음 때만 켠다:
+    # tts_client=OpenAIClient(),  # OpenAI (voice: ash/coral 필요, 영어 최적)
+    # tts_client=ElevenLabsClient(model_id='eleven_multilingual_v2'),  # ElevenLabs (한국어, 결제 필요)
+    tts_client=None,
 )

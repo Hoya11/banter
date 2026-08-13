@@ -63,12 +63,19 @@ def create_app(
         return FileResponse(WEB_DIR / 'index.html')
 
     async def _synthesize(speaker: str, text: str):
-        """화자 voice로 발화를 합성해 base64 mp3를 반환한다 (tts_client 없으면 None)."""
+        """화자 voice로 발화를 합성해 base64 mp3를 반환한다.
+
+        tts_client가 없거나 합성이 실패하면 None — TTS 문제로 대화 전체가 죽지 않게 격리한다.
+        """
         if tts_client is None or not text:
             return None
-        voice = get_persona(speaker).voice_id or 'alloy'
-        data = await tts_client.synthesize(text, voice)
-        return base64.b64encode(data).decode('ascii')
+        try:
+            voice = get_persona(speaker).voice_id or 'alloy'
+            data = await tts_client.synthesize(text, voice)
+            return base64.b64encode(data).decode('ascii')
+        except Exception as exc:  # TTS 실패해도 텍스트 대화는 계속
+            print(f'[tts] 합성 실패({type(exc).__name__}) — 소리 없이 진행')
+            return None
 
     async def _stream_turn(state: dict, ws: WebSocket, finish: bool = False):
         """한 AI 발화를 스트리밍하되, 도중 유저 개입이 오면 취소(barge-in)한다.
