@@ -64,6 +64,9 @@
         } else if (d.type === 'end') {
           if (current) current.body.textContent = d.text; // 최종본(프리픽스 제거 반영)
           current = null;
+        } else if (d.type === 'interrupted') {
+          if (current) current.body.textContent = (d.text || '') + ' —(끊김)';
+          current = null;
         } else if (d.type === 'done') {
           const input = document.getElementById('msg');
           input.disabled = true;

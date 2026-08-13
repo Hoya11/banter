@@ -4,6 +4,8 @@ fake 스트리밍 client로 '유저 발화 → start/token*/end 스트림' 흐�
 (LLM 답변 품질이 아니라 WS 프로토콜·엔진 구동·토큰 push 배관).
 """
 
+import asyncio
+
 from fastapi.testclient import TestClient
 
 from api.app import create_app
@@ -50,3 +52,30 @@ def test_ws_ends_after_max_turns():
                 break
         assert 'done' in types
         assert types.count('end') == 2  # 딱 2턴 후 종료
+
+
+class SlowStream:
+    """토큰 사이에 지연을 둬 스트리밍 도중 개입할 여지를 만드는 fake."""
+
+    async def complete_stream(self, system: str, user: str):
+        for token in ['아', '주', '천', '천', '히']:
+            await asyncio.sleep(0.1)
+            yield token
+
+
+def test_ws_barge_in_interrupts_stream():
+    # 스트리밍 도중 유저가 끼어들면 interrupted 이벤트가 나와야 한다
+    app = create_app(SlowStream(), max_turns=99, radio_sec=100)
+    client = TestClient(app)
+    with client.websocket_connect('/ws') as ws:
+        ws.send_text('시작')  # 첫 유저 발화 → AI 턴 시작
+        assert ws.receive_json()['type'] == 'start'
+        assert ws.receive_json()['type'] == 'token'  # 첫 토큰 나옴(스트림 진행 중)
+        ws.send_text('아니 그게 아니고')  # 발화 도중 끼어들기
+        interrupted = False
+        for _ in range(20):
+            msg = ws.receive_json()
+            if msg['type'] == 'interrupted':
+                interrupted = True
+                break
+        assert interrupted

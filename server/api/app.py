@@ -1,9 +1,10 @@
 """텍스트 실시간 채팅 API (Phase 1) — WebSocket으로 3자 대화를 스트리밍 서빙한다.
 
 유저는 WS로 연결·발화하고, 서버는 화자를 정한 뒤 발화를 토큰 단위로 push한다.
-유저가 radio_sec 동안 침묵하면 AI끼리 진행(라디오 모드).
-AI 발화가 max_turns에 도달하면 마무리 멘트 후 종료(세션 캡, PRD §5).
-프로토콜: {type:'start', speaker} → {type:'token', text}* → {type:'end', speaker, text} → {type:'done'}
+- 라디오 모드: 유저가 radio_sec 동안 침묵하면 AI끼리 진행.
+- barge-in(§2.1): AI 발화 스트리밍 도중 유저가 끼어들면 스트림을 취소하고 끊긴 지점까지만 기록.
+- 세션 캡(§5): AI 발화가 max_turns에 도달하면 마무리 멘트 후 종료.
+프로토콜: {start,speaker} → {token,text}* → {end|interrupted, speaker, text} → {done}
 """
 
 import asyncio
@@ -35,12 +36,12 @@ def _add_user(state: dict, text: str) -> dict:
     }
 
 
-def _apply_utterance(state: dict, speaker: str, text: str) -> dict:
-    """완성된 발화를 상태에 반영한다 (메시지 추가 + 발화 카운트)."""
+def _apply_utterance(state: dict, speaker: str, text: str, interrupted: bool = False) -> dict:
+    """발화를 상태에 반영한다 (메시지 추가 + 발화 카운트). interrupted면 끊긴 발화로 기록."""
     personas = {k: dict(v) for k, v in state['personas'].items()}
     if speaker in personas:
         personas[speaker]['speak_count'] += 1
-    msg = {'speaker': speaker, 'text': text, 'ts': 0.0, 'interrupted': False}
+    msg = {'speaker': speaker, 'text': text, 'ts': 0.0, 'interrupted': interrupted}
     return {**state, 'messages': state['messages'] + [msg], 'personas': personas}
 
 
@@ -58,46 +59,84 @@ def create_app(
         """채팅 UI 페이지를 서빙한다."""
         return FileResponse(WEB_DIR / 'index.html')
 
-    async def _stream_turn(state: dict, ws: WebSocket, finish: bool = False) -> dict:
+    async def _stream_turn(state: dict, ws: WebSocket, finish: bool = False):
+        """한 AI 발화를 스트리밍하되, 도중 유저 개입이 오면 취소(barge-in)한다.
+
+        반환: (새 state, barge_text) — barge_text가 있으면 유저가 끼어든 것.
+        """
         loop = asyncio.get_event_loop()
-        # 화자 결정 (sync supervisor를 executor로)
         sel = await loop.run_in_executor(None, select_next, state, supervisor_client)
         state = {**state, **sel}
         if finish:
-            # 세션 캡 도달 — 의도를 '마무리'로 덮어써 자연스러운 종료 멘트를 유도
             state = {**state, 'current_intent': FINISH_INTENT}
         system, user, speaker = prepare_utterance(state)
+        name = get_persona(speaker).name
 
         await ws.send_json({'type': 'start', 'speaker': speaker})
         parts: list[str] = []
-        if utterance_client is None:
-            parts.append(f'({speaker} 발화 스텁)')
-            await ws.send_json({'type': 'token', 'text': parts[0]})
-        else:
-            async for token in utterance_client.complete_stream(system, user):
-                parts.append(token)
-                await ws.send_json({'type': 'token', 'text': token})
 
-        text = _strip_speaker_prefix(''.join(parts), get_persona(speaker).name)
+        async def _run_stream():
+            if utterance_client is None:
+                parts.append(f'({speaker} 발화 스텁)')
+                await ws.send_json({'type': 'token', 'text': parts[-1]})
+            else:
+                async for token in utterance_client.complete_stream(system, user):
+                    parts.append(token)
+                    await ws.send_json({'type': 'token', 'text': token})
+
+        stream_task = asyncio.create_task(_run_stream())
+        recv_task = asyncio.create_task(ws.receive_text())
+        done, _ = await asyncio.wait(
+            {stream_task, recv_task}, return_when=asyncio.FIRST_COMPLETED
+        )
+
+        # 유저가 스트림 도중 끼어듦 → barge-in
+        if recv_task in done and not recv_task.cancelled():
+            stream_task.cancel()
+            try:
+                await stream_task
+            except asyncio.CancelledError:
+                pass
+            partial = _strip_speaker_prefix(''.join(parts), name)
+            await ws.send_json({'type': 'interrupted', 'speaker': speaker, 'text': partial})
+            state = _apply_utterance(state, speaker, partial, interrupted=True)
+            return state, recv_task.result()
+
+        # 정상 완료 → 대기 중이던 수신 취소
+        recv_task.cancel()
+        try:
+            await recv_task
+        except asyncio.CancelledError:
+            pass
+        text = _strip_speaker_prefix(''.join(parts), name)
         await ws.send_json({'type': 'end', 'speaker': speaker, 'text': text})
-        return _apply_utterance(state, speaker, text)
+        return _apply_utterance(state, speaker, text), None
 
     @app.websocket('/ws')
     async def chat(ws: WebSocket) -> None:
         await ws.accept()
         state = initial_state()
         turn = 0
+        pending_user = None  # barge-in으로 받은 유저 발화(다음 턴에 반영)
         try:
             while True:
-                # 유저 발화 대기 — radio_sec 안에 없으면 라디오 모드
-                try:
-                    incoming = await asyncio.wait_for(ws.receive_text(), timeout=radio_sec)
-                    state = _add_user(state, incoming)
-                except asyncio.TimeoutError:
-                    pass
-                finish = turn + 1 >= max_turns  # 이번 턴이 마지막인가(세션 캡)
-                state = await _stream_turn(state, ws, finish=finish)
+                if pending_user is not None:
+                    state = _add_user(state, pending_user)
+                    pending_user = None
+                else:
+                    try:
+                        incoming = await asyncio.wait_for(ws.receive_text(), timeout=radio_sec)
+                        state = _add_user(state, incoming)
+                    except asyncio.TimeoutError:
+                        pass
+
+                finish = turn + 1 >= max_turns
+                state, barge = await _stream_turn(state, ws, finish=finish)
                 turn += 1
+
+                if barge is not None:
+                    pending_user = barge  # 개입 발화를 다음 턴에 반영(세션 이어감)
+                    continue
                 if finish:
                     await ws.send_json({'type': 'done'})
                     break
