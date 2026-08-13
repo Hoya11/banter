@@ -41,7 +41,7 @@ def generate_utterance(state: ConvState, client=None) -> dict:
         text = f'({speaker} 발화 스텁)'
     else:
         system, user, _ = prepare_utterance(state)
-        text = _strip_speaker_prefix(client.complete(system, user), get_persona(speaker).name)
+        text = finalize_utterance(client.complete(system, user), get_persona(speaker).name)
     msg = {'speaker': speaker, 'text': text, 'ts': 0.0, 'interrupted': False}
     return {'messages': [msg]}
 
@@ -77,6 +77,33 @@ def _strip_speaker_prefix(text: str, name: str) -> str:
         if stripped.startswith(prefix):
             return stripped[len(prefix):].strip()
     return text
+
+
+# 발화 문장 수 상한 (§1.4 연설화 방지 — 프롬프트+후처리 이중 제어의 후처리 쪽)
+MAX_SENTENCES = 2
+_SENTENCE_END = ('.', '!', '?', '…')
+
+
+def limit_sentences(text: str, max_sentences: int = MAX_SENTENCES) -> str:
+    """발화를 문장 수 상한으로 자른다. 프롬프트가 어겨도 코드가 보장한다.
+
+    종결부호(.!?…) 기준으로 자르되, 부호 없는 짧은 반말체(예: '그치')는 그대로 둔다.
+    """
+    count = 0
+    for i, ch in enumerate(text):
+        if ch in _SENTENCE_END:
+            # 연속 부호('?!', '...')는 한 문장의 끝으로 묶는다
+            if i + 1 < len(text) and text[i + 1] in _SENTENCE_END:
+                continue
+            count += 1
+            if count >= max_sentences:
+                return text[: i + 1].strip()
+    return text.strip()
+
+
+def finalize_utterance(raw: str, name: str) -> str:
+    """LLM 발화 원문에 공통 후처리(프리픽스 제거 → 문장 상한)를 적용한다."""
+    return limit_sentences(_strip_speaker_prefix(raw, name))
 
 
 def build_graph(utterance_client=None, supervisor_client=None):

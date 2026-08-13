@@ -15,7 +15,7 @@ from pathlib import Path
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 
-from engine.graph.graph import _strip_speaker_prefix, prepare_utterance
+from engine.graph.graph import _strip_speaker_prefix, finalize_utterance, prepare_utterance
 from engine.graph.state import initial_state
 from engine.graph.supervisor import select_next
 from engine.personas.loader import get_persona
@@ -126,7 +126,8 @@ def create_app(
             await recv_task
         except asyncio.CancelledError:
             pass
-        text = _strip_speaker_prefix(''.join(parts), name)
+        # 최종본 확정: 프리픽스 제거 + 문장 상한(§1.4) — FE는 end에서 이 최종본으로 교체
+        text = finalize_utterance(''.join(parts), name)
         audio = await _synthesize(speaker, text)
         await ws.send_json({'type': 'end', 'speaker': speaker, 'text': text, 'audio': audio})
         return _apply_utterance(state, speaker, text), None
