@@ -6,12 +6,15 @@
 """
 
 import asyncio
+from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse
 
 from engine.graph.graph import build_graph
 from engine.graph.state import initial_state
 
+WEB_DIR = Path(__file__).resolve().parents[2] / 'web'
 RADIO_SEC = 5.0  # 유저 침묵이 이 시간을 넘으면 AI 턴을 자동 진행(라디오 모드)
 
 
@@ -31,6 +34,11 @@ def create_app(utterance_client=None, supervisor_client=None) -> FastAPI:
     """WS 채팅 앱을 만든다. LLM client를 주입받아(테스트는 fake) 엔진을 구동한다."""
     app = FastAPI()
     graph = build_graph(utterance_client, supervisor_client)
+
+    @app.get('/')
+    def index():
+        """채팅 UI 페이지를 서빙한다."""
+        return FileResponse(WEB_DIR / 'index.html')
 
     async def _ai_turn(state: dict) -> dict:
         # sync 엔진 호출을 executor로 — 이벤트 루프를 막지 않는다
