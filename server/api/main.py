@@ -12,7 +12,7 @@ from engine.eval.providers import OpenAIClient
 load_dotenv()
 
 app = create_app(
-    utterance_client=OpenAIClient(temperature=0.9),
-    supervisor_client=OpenAIClient(json_mode=True),
+    utterance_client=OpenAIClient(model='gpt-5.6-luna', temperature=None),  # 발화 생성(temp 고정 모델)
+    supervisor_client=OpenAIClient(json_mode=True),  # 화자 선정(gpt-4o-mini, 비용 절약)
     tts_client=OpenAIClient(),  # 발화 → 화자 voice로 음성 합성
 )

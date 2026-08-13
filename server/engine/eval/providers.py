@@ -40,13 +40,14 @@ class OpenAIClient:
         kwargs = {}
         if self._json:
             kwargs['response_format'] = {'type': 'json_object'}  # 순수 JSON 강제
+        if self._temperature is not None:  # 일부 신형 모델은 temperature 고정(미지원)
+            kwargs['temperature'] = self._temperature
         resp = self._client.chat.completions.create(
             model=self._model,
             messages=[
                 {'role': 'system', 'content': system},
                 {'role': 'user', 'content': user},
             ],
-            temperature=self._temperature,
             **kwargs,
         )
         return resp.choices[0].message.content or ''
@@ -57,14 +58,17 @@ class OpenAIClient:
 
         if self._async_client is None:
             self._async_client = AsyncOpenAI(api_key=self._api_key)
+        kwargs = {}
+        if self._temperature is not None:  # 일부 신형 모델은 temperature 고정(미지원)
+            kwargs['temperature'] = self._temperature
         stream = await self._async_client.chat.completions.create(
             model=self._model,
             messages=[
                 {'role': 'system', 'content': system},
                 {'role': 'user', 'content': user},
             ],
-            temperature=self._temperature,
             stream=True,
+            **kwargs,
         )
         async for chunk in stream:
             delta = chunk.choices[0].delta.content
