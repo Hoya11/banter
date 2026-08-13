@@ -23,6 +23,7 @@ class OpenAIClient:
         api_key: str | None = None,
         json_mode: bool = False,
         temperature: float = 0.0,
+        tts_model: str = 'tts-1',
     ):
         key = api_key or os.environ.get('OPENAI_API_KEY')
         if not key:
@@ -33,6 +34,7 @@ class OpenAIClient:
         self._model = model
         self._json = json_mode  # judge=True(순수 JSON), 발화=False(자유 텍스트)
         self._temperature = temperature  # judge=0(재현성), 발화=높게(다양성)
+        self._tts_model = tts_model  # TTS 모델 (예: tts-1, tts-1-hd, gpt-4o-mini-tts)
 
     def complete(self, system: str, user: str) -> str:
         kwargs = {}
@@ -76,6 +78,6 @@ class OpenAIClient:
         if self._async_client is None:
             self._async_client = AsyncOpenAI(api_key=self._api_key)
         resp = await self._async_client.audio.speech.create(
-            model='tts-1', voice=voice, input=text, response_format='mp3'
+            model=self._tts_model, voice=voice, input=text, response_format='mp3'
         )
         return resp.content
