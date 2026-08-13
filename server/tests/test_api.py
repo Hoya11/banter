@@ -36,3 +36,17 @@ def test_ws_stub_when_no_client():
         end = ws.receive_json()
         assert end['type'] == 'end'
         assert '스텁' in end['text']
+
+
+def test_ws_ends_after_max_turns():
+    # 세션 캡: max_turns 도달 시 done 신호 후 종료 (radio_sec 짧게 → 라디오로 자동 진행)
+    app = create_app(FakeStream(), max_turns=2, radio_sec=0.01)
+    client = TestClient(app)
+    with client.websocket_connect('/ws') as ws:
+        types = []
+        for _ in range(40):
+            types.append(ws.receive_json()['type'])
+            if types[-1] == 'done':
+                break
+        assert 'done' in types
+        assert types.count('end') == 2  # 딱 2턴 후 종료

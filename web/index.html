@@ -64,6 +64,10 @@
         } else if (d.type === 'end') {
           if (current) current.body.textContent = d.text; // 최종본(프리픽스 제거 반영)
           current = null;
+        } else if (d.type === 'done') {
+          const input = document.getElementById('msg');
+          input.disabled = true;
+          input.placeholder = '세션이 마무리됐어요. 새로고침하면 다시 시작해요.';
         }
       };
 
