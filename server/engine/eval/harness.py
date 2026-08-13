@@ -4,6 +4,7 @@ Phase 1의 핵심 루프. 이 파이프가 페르소나·프롬프트 튜닝의 
 (감이 아니라 judge 점수로 판단). 결과는 sink로 기록해 버전별 비교에 쓴다.
 """
 
+import statistics
 from pathlib import Path
 
 import yaml
@@ -114,3 +115,39 @@ def run_scenario_set(utterance_client, judge_client, supervisor_client=None) -> 
         )
         out.append({'id': scenario['id'], 'result': result, 'go': go})
     return out
+
+
+def score_stats(results: list[JudgeResult]) -> dict:
+    """여러 JudgeResult의 항목별 평균·표준편차(모집단)를 낸다."""
+    if not results:
+        return {}
+    stats = {}
+    for key in results[0].scores:
+        vals = [r.scores[key].score for r in results]
+        stats[key] = {
+            'mean': statistics.mean(vals),
+            'std': statistics.pstdev(vals),
+            'values': vals,
+        }
+    return stats
+
+
+def score_transcript_repeated(
+    transcript: list[Turn], judge_client, n: int = 5, rubric_version: str = 'v1'
+) -> dict:
+    """고정 대화를 N회 채점해 항목별 통계를 낸다 (judge 순수 변동)."""
+    results = [judge(transcript, judge_client, rubric_version) for _ in range(n)]
+    return score_stats(results)
+
+
+def run_scenario_repeated(
+    steps: list[dict], utterance_client, judge_client, n: int = 3, supervisor_client=None
+) -> dict:
+    """시나리오를 N회 실행·채점해 항목별 통계를 낸다 (대화 변동 + judge 변동)."""
+    results = []
+    for _ in range(n):
+        _, result, _ = run_scenario(
+            steps, utterance_client, judge_client, supervisor_client=supervisor_client
+        )
+        results.append(result)
+    return score_stats(results)

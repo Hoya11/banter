@@ -4,8 +4,16 @@ fake client로 '대화 생성 → 채점 → go 판정' 흐름이 이어지는�
 (LLM 답변 품질이 아니라 파이프 연결을 본다).
 """
 
-from engine.eval.harness import _interrupt, load_scenarios, run_pilot, run_scenario
+from engine.eval.harness import (
+    _interrupt,
+    load_scenarios,
+    run_pilot,
+    run_scenario,
+    score_stats,
+    score_transcript_repeated,
+)
 from engine.eval.judge import load_rubric
+from engine.eval.schema import ItemScore, JudgeResult, Turn
 
 
 class FakeUtterance:
@@ -67,3 +75,22 @@ def test_run_scenario_handles_interrupt():
     transcript, result, _ = run_scenario(steps, FakeUtterance(), FakeJudge())
     assert any(t.speaker == 'user' and t.text == '잠깐만' for t in transcript)
     assert set(result.scores) == {it['key'] for it in load_rubric()['items']}
+
+
+def test_score_stats_mean_and_std():
+    def _r(value):
+        return JudgeResult(scores={'k': ItemScore(score=value, reason='')}, overall_comment='')
+
+    stats = score_stats([_r(6), _r(8)])
+    assert stats['k']['mean'] == 7.0
+    assert stats['k']['std'] == 1.0  # pstdev([6, 8]) = 1.0
+    assert stats['k']['values'] == [6, 8]
+
+
+def test_score_transcript_repeated_batches_all_runs():
+    # FakeJudge는 항상 8점 균일 → 평균 8, 표준편차 0, n회 수집
+    stats = score_transcript_repeated([Turn(speaker='ai_a', text='x')], FakeJudge(), n=3)
+    for s in stats.values():
+        assert s['mean'] == 8.0
+        assert s['std'] == 0.0
+        assert len(s['values']) == 3
