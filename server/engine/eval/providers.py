@@ -68,3 +68,14 @@ class OpenAIClient:
             delta = chunk.choices[0].delta.content
             if delta:
                 yield delta
+
+    async def synthesize(self, text: str, voice: str) -> bytes:
+        """텍스트를 음성(mp3 bytes)으로 합성한다 (TTS)."""
+        from openai import AsyncOpenAI
+
+        if self._async_client is None:
+            self._async_client = AsyncOpenAI(api_key=self._api_key)
+        resp = await self._async_client.audio.speech.create(
+            model='tts-1', voice=voice, input=text, response_format='mp3'
+        )
+        return resp.content

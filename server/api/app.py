@@ -1,13 +1,15 @@
-"""텍스트 실시간 채팅 API (Phase 1) — WebSocket으로 3자 대화를 스트리밍 서빙한다.
+"""텍스트+음성 실시간 채팅 API (Phase 1~2) — WebSocket으로 3자 대화를 스트리밍 서빙한다.
 
 유저는 WS로 연결·발화하고, 서버는 화자를 정한 뒤 발화를 토큰 단위로 push한다.
 - 라디오 모드: 유저가 radio_sec 동안 침묵하면 AI끼리 진행.
-- barge-in(§2.1): AI 발화 스트리밍 도중 유저가 끼어들면 스트림을 취소하고 끊긴 지점까지만 기록.
+- barge-in(§2.1): 스트리밍 도중 유저가 끼어들면 취소하고 끊긴 지점까지만 기록.
 - 세션 캡(§5): AI 발화가 max_turns에 도달하면 마무리 멘트 후 종료.
-프로토콜: {start,speaker} → {token,text}* → {end|interrupted, speaker, text} → {done}
+- 음성(Phase 2): tts_client가 있으면 발화 완성 시 화자 voice로 합성한 mp3(base64)를 함께 전송.
+프로토콜: {start,speaker} → {token,text}* → {end,speaker,text,audio?|interrupted,speaker,text} → {done}
 """
 
 import asyncio
+import base64
 from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -48,16 +50,25 @@ def _apply_utterance(state: dict, speaker: str, text: str, interrupted: bool = F
 def create_app(
     utterance_client=None,
     supervisor_client=None,
+    tts_client=None,
     max_turns: int = MAX_TURNS,
     radio_sec: float = RADIO_SEC,
 ) -> FastAPI:
-    """WS 채팅 앱을 만든다. LLM client를 주입받아(테스트는 fake) 엔진을 구동한다."""
+    """WS 채팅 앱을 만든다. LLM/TTS client를 주입받아(테스트는 fake) 엔진을 구동한다."""
     app = FastAPI()
 
     @app.get('/')
     def index():
         """채팅 UI 페이지를 서빙한다."""
         return FileResponse(WEB_DIR / 'index.html')
+
+    async def _synthesize(speaker: str, text: str):
+        """화자 voice로 발화를 합성해 base64 mp3를 반환한다 (tts_client 없으면 None)."""
+        if tts_client is None or not text:
+            return None
+        voice = get_persona(speaker).voice_id or 'alloy'
+        data = await tts_client.synthesize(text, voice)
+        return base64.b64encode(data).decode('ascii')
 
     async def _stream_turn(state: dict, ws: WebSocket, finish: bool = False):
         """한 AI 발화를 스트리밍하되, 도중 유저 개입이 오면 취소(barge-in)한다.
@@ -90,7 +101,7 @@ def create_app(
             {stream_task, recv_task}, return_when=asyncio.FIRST_COMPLETED
         )
 
-        # 유저가 스트림 도중 끼어듦 → barge-in
+        # 유저가 스트림 도중 끼어듦 → barge-in (부분 발화는 음성 합성하지 않음)
         if recv_task in done and not recv_task.cancelled():
             stream_task.cancel()
             try:
@@ -102,14 +113,15 @@ def create_app(
             state = _apply_utterance(state, speaker, partial, interrupted=True)
             return state, recv_task.result()
 
-        # 정상 완료 → 대기 중이던 수신 취소
+        # 정상 완료 → 대기 중이던 수신 취소 + 음성 합성
         recv_task.cancel()
         try:
             await recv_task
         except asyncio.CancelledError:
             pass
         text = _strip_speaker_prefix(''.join(parts), name)
-        await ws.send_json({'type': 'end', 'speaker': speaker, 'text': text})
+        audio = await _synthesize(speaker, text)
+        await ws.send_json({'type': 'end', 'speaker': speaker, 'text': text, 'audio': audio})
         return _apply_utterance(state, speaker, text), None
 
     @app.websocket('/ws')
@@ -146,5 +158,5 @@ def create_app(
     return app
 
 
-# uvicorn 기동용 기본 앱 (실제 LLM client는 main에서 주입 — 아래는 스텁 폴백)
+# uvicorn 기동용 기본 앱 (실제 LLM/TTS client는 main에서 주입 — 아래는 스텁 폴백)
 app = create_app()

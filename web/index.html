@@ -51,6 +51,22 @@
         return { wrap, body };
       }
 
+      // 발화 오디오를 순차 재생 (겹침 방지)
+      const audioQueue = [];
+      let playing = false;
+      function enqueueAudio(b64) {
+        audioQueue.push(b64);
+        if (!playing) playNext();
+      }
+      function playNext() {
+        if (!audioQueue.length) { playing = false; return; }
+        playing = true;
+        const audio = new Audio('data:audio/mp3;base64,' + audioQueue.shift());
+        audio.onended = playNext;
+        audio.onerror = playNext;
+        audio.play().catch(playNext);
+      }
+
       const ws = new WebSocket('ws://' + location.host + '/ws');
       let current = null; // 스트리밍 중인 AI 발화 버블
 
@@ -64,6 +80,7 @@
         } else if (d.type === 'end') {
           if (current) current.body.textContent = d.text; // 최종본(프리픽스 제거 반영)
           current = null;
+          if (d.audio) enqueueAudio(d.audio); // 목소리 재생
         } else if (d.type === 'interrupted') {
           if (current) current.body.textContent = (d.text || '') + ' —(끊김)';
           current = null;

@@ -14,4 +14,5 @@ load_dotenv()
 app = create_app(
     utterance_client=OpenAIClient(temperature=0.9),
     supervisor_client=OpenAIClient(json_mode=True),
+    tts_client=OpenAIClient(),  # 발화 → 화자 voice로 음성 합성
 )
