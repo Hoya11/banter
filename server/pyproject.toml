@@ -4,12 +4,14 @@ version = "0.1.0"
 description = "banter 3자 음성 수다 백엔드 — API + 3자 오케스트레이터(LangGraph)"
 requires-python = ">=3.13"
 dependencies = [
+    "fastapi>=0.141.1",
     "langfuse>=4.14.4",
     "langgraph>=1.2.11",
     "openai>=3.0.0",
     "pydantic>=2.13.4",
     "python-dotenv>=1.2.2",
     "pyyaml>=6.0.3",
+    "uvicorn[standard]>=0.52.1",
 ]
 
 [dependency-groups]
