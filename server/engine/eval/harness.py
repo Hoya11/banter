@@ -135,19 +135,33 @@ def score_stats(results: list[JudgeResult]) -> dict:
 def score_transcript_repeated(
     transcript: list[Turn], judge_client, n: int = 5, rubric_version: str = 'v1'
 ) -> dict:
-    """고정 대화를 N회 채점해 항목별 통계를 낸다 (judge 순수 변동)."""
-    results = [judge(transcript, judge_client, rubric_version) for _ in range(n)]
+    """고정 대화를 N회 채점해 항목별 통계를 낸다 (judge 순수 변동).
+
+    개별 채점이 실패하면(파싱·검증 오류) 그 회차만 제외하고 나머지로 집계한다.
+    """
+    results = []
+    for _ in range(n):
+        try:
+            results.append(judge(transcript, judge_client, rubric_version))
+        except Exception:
+            continue
     return score_stats(results)
 
 
 def run_scenario_repeated(
     steps: list[dict], utterance_client, judge_client, n: int = 3, supervisor_client=None
 ) -> dict:
-    """시나리오를 N회 실행·채점해 항목별 통계를 낸다 (대화 변동 + judge 변동)."""
+    """시나리오를 N회 실행·채점해 항목별 통계를 낸다 (대화 변동 + judge 변동).
+
+    개별 회차가 실패하면 제외하고 나머지로 집계한다.
+    """
     results = []
     for _ in range(n):
-        _, result, _ = run_scenario(
-            steps, utterance_client, judge_client, supervisor_client=supervisor_client
-        )
-        results.append(result)
+        try:
+            _, result, _ = run_scenario(
+                steps, utterance_client, judge_client, supervisor_client=supervisor_client
+            )
+            results.append(result)
+        except Exception:
+            continue
     return score_stats(results)

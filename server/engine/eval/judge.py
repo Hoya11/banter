@@ -5,6 +5,7 @@ LLM provider를 주입받아 대화를 루브릭으로 채점한다.
 바뀌는 건 주입되는 LLMClient 구현뿐이다.
 """
 
+import json
 from pathlib import Path
 from typing import Protocol
 
@@ -43,8 +44,8 @@ def build_prompt(rubric: dict, transcript: list[Turn]) -> tuple[str, str]:
         '너는 3자 수다(유저 1명 + AI 2명) 대화의 품질을 채점하는 평가자다.\n'
         f'각 항목을 {lo}~{hi} 정수로 채점하고 근거를 한국어로 짧게 남겨라.\n'
         f'채점 항목:\n{items}\n'
-        '출력은 아래 JSON만 반환한다:\n'
-        '{"scores": {"<key>": {"score": int, "reason": str}, ...}, "overall_comment": str}'
+        'JSON만 반환한다. overall_comment는 scores 바깥의 최상위 필드다 (scores 안에 넣지 마라):\n'
+        '{"scores": {"<key>": {"score": int, "reason": str}, ... (위 항목 전부)}, "overall_comment": "총평"}'
     )
     convo = '\n'.join(f'{t.speaker}: {t.text}' for t in transcript)
     user = f'다음 대화를 채점하라:\n{convo}'
@@ -62,11 +63,26 @@ def judge(
     rubric = load_rubric(rubric_version)
     system, user = build_prompt(rubric, transcript)
     raw = client.complete(system, user)
-    # TODO(LLM 배선 시): raw가 코드펜스·설명 텍스트로 감싸일 수 있음 — JSON 추출/파싱 실패 처리 추가
-    result = JudgeResult.model_validate_json(raw)
+    result = JudgeResult.model_validate(_parse_judge_json(raw))
     expected = {it['key'] for it in rubric['items']}
     if set(result.scores) != expected:
         raise ValueError(
             f'채점 항목 불일치: 기대={sorted(expected)}, 실제={sorted(result.scores)}'
         )
     return result
+
+
+def _parse_judge_json(raw: str) -> dict:
+    """judge 출력 JSON을 파싱하고 흔한 구조 오류를 복구한다.
+
+    LLM이 overall_comment를 scores 안에 잘못 넣는 경우를 최상위로 끄집어낸다.
+    """
+    data = json.loads(raw)
+    scores = data.get('scores')
+    if (
+        isinstance(scores, dict)
+        and 'overall_comment' in scores
+        and 'overall_comment' not in data
+    ):
+        data['overall_comment'] = scores.pop('overall_comment')
+    return data

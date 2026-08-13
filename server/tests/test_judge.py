@@ -50,3 +50,13 @@ def test_judge_rejects_wrong_key():
     keys[0] = 'turntaking'
     with pytest.raises(ValueError):
         judge(CONVO, FakeClient(_payload(keys)))
+
+
+def test_judge_recovers_misplaced_overall_comment():
+    # LLM이 overall_comment를 scores 안에 넣어도 복구해 파싱한다
+    keys = _rubric_keys()
+    items = ', '.join(f'"{k}": {{"score": 8, "reason": "ok"}}' for k in keys)
+    payload = '{"scores": {' + items + ', "overall_comment": "총평"}}'
+    result = judge(CONVO, FakeClient(payload))
+    assert result.overall_comment == '총평'
+    assert set(result.scores) == set(keys)
