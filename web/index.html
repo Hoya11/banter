@@ -7,13 +7,12 @@
     <style>
       :root { color-scheme: light dark; }
       body {
-        margin: 0;
+        margin: 0 auto;
         font-family: system-ui, sans-serif;
         display: flex;
         flex-direction: column;
         height: 100vh;
         max-width: 640px;
-        margin: 0 auto;
       }
       header { padding: 12px 16px; font-weight: 600; border-bottom: 1px solid #8883; }
       #log { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 8px; }
@@ -49,12 +48,23 @@
         wrap.append(name, body);
         log.append(wrap);
         log.scrollTop = log.scrollHeight;
+        return { wrap, body };
       }
 
       const ws = new WebSocket('ws://' + location.host + '/ws');
+      let current = null; // 스트리밍 중인 AI 발화 버블
+
       ws.onmessage = (e) => {
         const d = JSON.parse(e.data);
-        add(d.speaker, d.text);
+        if (d.type === 'start') {
+          current = add(d.speaker, ''); // 빈 버블로 시작
+        } else if (d.type === 'token') {
+          if (current) current.body.textContent += d.text; // 한 글자씩 append
+          log.scrollTop = log.scrollHeight;
+        } else if (d.type === 'end') {
+          if (current) current.body.textContent = d.text; // 최종본(프리픽스 제거 반영)
+          current = null;
+        }
       };
 
       document.getElementById('form').onsubmit = (e) => {

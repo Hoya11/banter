@@ -28,6 +28,8 @@ class OpenAIClient:
         if not key:
             raise RuntimeError('OPENAI_API_KEY가 없다 — server/.env에 설정하라')
         self._client = OpenAI(api_key=key)
+        self._api_key = key
+        self._async_client = None  # 스트리밍용, lazy 생성
         self._model = model
         self._json = json_mode  # judge=True(순수 JSON), 발화=False(자유 텍스트)
         self._temperature = temperature  # judge=0(재현성), 발화=높게(다양성)
@@ -46,3 +48,23 @@ class OpenAIClient:
             **kwargs,
         )
         return resp.choices[0].message.content or ''
+
+    async def complete_stream(self, system: str, user: str):
+        """발화를 토큰 단위로 스트리밍한다 (async generator). 발화 생성 전용."""
+        from openai import AsyncOpenAI
+
+        if self._async_client is None:
+            self._async_client = AsyncOpenAI(api_key=self._api_key)
+        stream = await self._async_client.chat.completions.create(
+            model=self._model,
+            messages=[
+                {'role': 'system', 'content': system},
+                {'role': 'user', 'content': user},
+            ],
+            temperature=self._temperature,
+            stream=True,
+        )
+        async for chunk in stream:
+            delta = chunk.choices[0].delta.content
+            if delta:
+                yield delta

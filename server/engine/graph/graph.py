@@ -14,25 +14,34 @@ from .supervisor import select_next
 SUMMON_THRESHOLD = 3
 
 
-def generate_utterance(state: ConvState, client=None) -> dict:
-    """현재 화자의 발화를 생성한다.
+def prepare_utterance(state: ConvState) -> tuple[str, str, str]:
+    """현재 화자의 (system, user) 프롬프트와 speaker를 준비한다 (LLM 호출 직전까지).
 
-    client가 없으면 스텁, 있으면 페르소나 프롬프트 + supervisor 의도 + 이력으로 LLM 발화.
+    발화를 non-stream(generate_utterance)으로 하든 stream(API)으로 하든 이 준비는 공통이다.
+    """
+    speaker = state['current_speaker']
+    persona = get_persona(speaker)
+    others = [k for k in ('ai_a', 'ai_b') if k != speaker]
+    other_name = get_persona(others[0]).name if others else ''
+    consec = state['consecutive_ai_turns']
+    summon = consec > 0 and consec % SUMMON_THRESHOLD == 0
+    system = build_persona_prompt(
+        persona, other_name, summon_user=summon, intent=state.get('current_intent')
+    )
+    return system, _render_history(state['messages']), speaker
+
+
+def generate_utterance(state: ConvState, client=None) -> dict:
+    """현재 화자의 발화를 생성한다 (non-stream).
+
+    client가 없으면 스텁, 있으면 prepare_utterance 프롬프트로 LLM 발화.
     """
     speaker = state['current_speaker']
     if client is None:
         text = f'({speaker} 발화 스텁)'
     else:
-        persona = get_persona(speaker)
-        others = [k for k in ('ai_a', 'ai_b') if k != speaker]
-        other_name = get_persona(others[0]).name if others else ''
-        consec = state['consecutive_ai_turns']
-        summon = consec > 0 and consec % SUMMON_THRESHOLD == 0
-        system = build_persona_prompt(
-            persona, other_name, summon_user=summon, intent=state.get('current_intent')
-        )
-        text = client.complete(system, _render_history(state['messages']))
-        text = _strip_speaker_prefix(text, persona.name)
+        system, user, _ = prepare_utterance(state)
+        text = _strip_speaker_prefix(client.complete(system, user), get_persona(speaker).name)
     msg = {'speaker': speaker, 'text': text, 'ts': 0.0, 'interrupted': False}
     return {'messages': [msg]}
 
