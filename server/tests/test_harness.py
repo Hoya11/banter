@@ -60,14 +60,35 @@ def test_scenarios_yaml_loads_and_is_wellformed():
                 assert step.get('text')  # 유저/개입 step엔 발화 텍스트 필수
 
 
-def test_interrupt_marks_previous_ai_and_injects_user():
-    state = {'messages': [{'speaker': 'ai_a', 'text': '내 말은', 'ts': 0.0, 'interrupted': False}]}
+def test_interrupt_truncates_and_marks_previous_ai():
+    # 끊긴 발화는 플래그만이 아니라 텍스트도 실제로 잘려야 한다 (검수 정정 반영)
+    state = {
+        'messages': [
+            {'speaker': 'ai_a', 'text': '오늘 회사에서 진짜 별일 다 있었거든', 'ts': 0.0, 'interrupted': False}
+        ]
+    }
     out = _interrupt(state, '잠깐만')
-    assert out['messages'][0]['interrupted'] is True  # 직전 AI 발화가 끊김 표시됨
+    cut = out['messages'][0]
+    assert cut['interrupted'] is True
+    assert len(cut['text']) < len('오늘 회사에서 진짜 별일 다 있었거든')  # 실제로 잘림
     assert out['messages'][-1]['speaker'] == 'user'
-    assert out['messages'][-1]['text'] == '잠깐만'
     assert out['current_speaker'] == 'user'
     assert out['consecutive_ai_turns'] == 0
+
+
+def test_transcript_carries_interrupted_to_judge():
+    # interrupted 플래그가 judge 입력(Turn)과 프롬프트까지 전달돼야 수습 평가가 성립한다
+    from engine.eval.harness import _to_transcript
+    from engine.eval.judge import build_prompt, load_rubric
+
+    messages = [
+        {'speaker': 'ai_a', 'text': '오늘 회사에서', 'ts': 0.0, 'interrupted': True},
+        {'speaker': 'user', 'text': '잠깐만', 'ts': 0.0, 'interrupted': False},
+    ]
+    transcript = _to_transcript(messages)
+    assert transcript[0].interrupted is True
+    _, user_prompt = build_prompt(load_rubric(), transcript)
+    assert '[말하다 끊김]' in user_prompt
 
 
 def test_run_scenario_handles_interrupt():

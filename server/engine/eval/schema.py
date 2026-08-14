@@ -8,10 +8,15 @@ from pydantic import BaseModel, Field
 
 
 class Turn(BaseModel):
-    """대화 한 턴. judge 입력(transcript)의 원소."""
+    """대화 한 턴. judge 입력(transcript)의 원소.
+
+    interrupted: 끼어들기로 잘린 발화(§2.1). judge가 '끊긴 뒤 수습'을
+    평가하려면 이 사실을 알아야 한다 — 없으면 평범한 대화로 채점된다.
+    """
 
     speaker: str  # user | ai_a | ai_b
     text: str
+    interrupted: bool = False
 
 
 class ItemScore(BaseModel):

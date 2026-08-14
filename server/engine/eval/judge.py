@@ -47,7 +47,11 @@ def build_prompt(rubric: dict, transcript: list[Turn]) -> tuple[str, str]:
         'JSON만 반환한다. overall_comment는 scores 바깥의 최상위 필드다 (scores 안에 넣지 마라):\n'
         '{"scores": {"<key>": {"score": int, "reason": str}, ... (위 항목 전부)}, "overall_comment": "총평"}'
     )
-    convo = '\n'.join(f'{t.speaker}: {t.text}' for t in transcript)
+    # 끊긴 발화는 표시해서 judge가 '개입 후 수습'을 실제로 평가할 수 있게 한다
+    convo = '\n'.join(
+        f'{t.speaker}: {t.text}' + (' [말하다 끊김]' if t.interrupted else '')
+        for t in transcript
+    )
     user = f'다음 대화를 채점하라:\n{convo}'
     return system, user
 

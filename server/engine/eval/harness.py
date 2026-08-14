@@ -32,7 +32,7 @@ def run_pilot(
     for _ in range(turns):
         state = graph.invoke(state)
 
-    transcript = [Turn(speaker=m['speaker'], text=m['text']) for m in state['messages']]
+    transcript = _to_transcript(state['messages'])
     result = judge(transcript, judge_client, rubric_version)
     get_sink().record_judge(
         transcript,
@@ -40,6 +40,15 @@ def run_pilot(
         {'source': 'pilot', 'turns': turns, 'rubric_version': rubric_version},
     )
     return transcript, result, is_go(result)
+
+
+def _to_transcript(messages: list[dict]) -> list[Turn]:
+    """상태 메시지를 judge 입력으로 변환한다 — interrupted 플래그를 보존해야
+    judge가 끊김을 인지한다(누락 시 barge-in 평가가 무효가 된다)."""
+    return [
+        Turn(speaker=m['speaker'], text=m['text'], interrupted=m.get('interrupted', False))
+        for m in messages
+    ]
 
 
 def load_scenarios() -> list[dict]:
@@ -62,10 +71,25 @@ def _inject_user(state: dict, text: str) -> dict:
     }
 
 
+def _truncate_midway(text: str) -> str:
+    """발화를 중간에서 자른다 — 실제 barge-in에서 '재생된 지점까지만 남는' 상황 재현.
+
+    절반 지점 이전의 마지막 공백에서 자른다(단어 중간 파손 방지). 결정적이라 테스트 가능.
+    """
+    half = len(text) // 2
+    cut = text.rfind(' ', 0, half)
+    return text[: cut if cut > 0 else half].rstrip()
+
+
 def _interrupt(state: dict, text: str) -> dict:
-    """AI 발화 중 유저 개입 — 직전 AI 발화를 끊김 표시하고 유저 발화를 주입한다(§2.1)."""
+    """AI 발화 중 유저 개입 — 직전 AI 발화를 실제로 잘라 끊김 처리하고 유저 발화를 주입한다(§2.1).
+
+    플래그만 달면 judge가 온전한 발화를 보게 되어 '수습 능력'이 평가되지 않는다
+    (2026-08-14 검수에서 발견·정정). API의 barge-in과 동일하게 부분 발화만 남긴다.
+    """
     messages = [dict(m) for m in state['messages']]
     if messages and messages[-1]['speaker'] in ('ai_a', 'ai_b'):
+        messages[-1]['text'] = _truncate_midway(messages[-1]['text'])
         messages[-1]['interrupted'] = True
     messages.append({'speaker': 'user', 'text': text, 'ts': 0.0, 'interrupted': False})
     return {
@@ -95,7 +119,7 @@ def run_scenario(
         else:
             state = graph.invoke(state)
 
-    transcript = [Turn(speaker=m['speaker'], text=m['text']) for m in state['messages']]
+    transcript = _to_transcript(state['messages'])
     result = judge(transcript, judge_client, rubric_version)
     get_sink().record_judge(
         transcript, result, {'source': 'scenario', 'rubric_version': rubric_version}
@@ -143,8 +167,11 @@ def score_transcript_repeated(
     for _ in range(n):
         try:
             results.append(judge(transcript, judge_client, rubric_version))
-        except Exception:
-            continue
+        except Exception as exc:
+            # 실패를 무음으로 삼키면 표본 수가 조용히 줄어 통계가 왜곡된다 — 반드시 남긴다
+            print(f'[repeat] 채점 실패({type(exc).__name__}) — 회차 제외')
+    if len(results) < n:
+        print(f'[repeat] 유효 표본 {len(results)}/{n} — 통계 해석 시 주의')
     return score_stats(results)
 
 
@@ -162,6 +189,7 @@ def run_scenario_repeated(
                 steps, utterance_client, judge_client, supervisor_client=supervisor_client
             )
             results.append(result)
-        except Exception:
+        except Exception as exc:
+            print(f'[repeat] 회차 실패({type(exc).__name__}) — 제외')
             continue
     return score_stats(results)
