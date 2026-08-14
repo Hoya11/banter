@@ -86,6 +86,41 @@ def test_ws_barge_in_interrupts_stream():
         assert interrupted
 
 
+class BrokenStream:
+    """첫 토큰 후 터지는 fake — 스트림 중간 실패 재현."""
+
+    async def complete_stream(self, system: str, user: str):
+        yield '안'
+        raise RuntimeError('LLM 500 mid-stream')
+
+
+def test_ws_stream_error_skips_turn():
+    # 스트림 중간 실패 → end가 아니라 error, 부분 발화가 확정되지 않는다
+    app = create_app(BrokenStream(), max_turns=1, radio_sec=0.01)
+    client = TestClient(app)
+    with client.websocket_connect('/ws') as ws:
+        ws.send_text('하이')
+        types = [ws.receive_json()['type'] for _ in range(3)]
+        assert types == ['start', 'token', 'error']  # end 없음
+
+
+def test_ws_done_even_if_barge_on_final_turn():
+    # 마무리 턴에 끼어들어도 세션 캡이 우선 — done이 반드시 온다
+    app = create_app(SlowStream(), max_turns=1, radio_sec=100)
+    client = TestClient(app)
+    with client.websocket_connect('/ws') as ws:
+        ws.send_text('시작')
+        assert ws.receive_json()['type'] == 'start'
+        assert ws.receive_json()['type'] == 'token'
+        ws.send_text('잠깐만')  # 마지막(마무리) 턴에 barge-in
+        types = []
+        for _ in range(20):
+            types.append(ws.receive_json()['type'])
+            if types[-1] == 'done':
+                break
+        assert 'done' in types
+
+
 class FakeTTS:
     async def synthesize(self, text: str, voice: str) -> bytes:
         return b'FAKEAUDIO'

@@ -61,10 +61,12 @@
       function playNext() {
         if (!audioQueue.length) { playing = false; return; }
         playing = true;
-        const audio = new Audio('data:audio/mp3;base64,' + audioQueue.shift());
-        audio.onended = playNext;
-        audio.onerror = playNext;
-        audio.play().catch(playNext);
+        const audio = new Audio('data:audio/mpeg;base64,' + audioQueue.shift());
+        let advanced = false; // onended/onerror/catch 중복 호출로 큐가 두 칸 나가는 것 방지
+        const advance = () => { if (advanced) return; advanced = true; playNext(); };
+        audio.onended = advance;
+        audio.onerror = advance;
+        audio.play().catch(advance);
       }
 
       const ws = new WebSocket('ws://' + location.host + '/ws');
@@ -84,12 +86,22 @@
         } else if (d.type === 'interrupted') {
           if (current) current.body.textContent = (d.text || '') + ' —(끊김)';
           current = null;
+        } else if (d.type === 'error') {
+          if (current) current.wrap.remove(); // 실패한 턴의 빈 버블 제거
+          current = null;
         } else if (d.type === 'done') {
-          const input = document.getElementById('msg');
-          input.disabled = true;
-          input.placeholder = '세션이 마무리됐어요. 새로고침하면 다시 시작해요.';
+          endSession('세션이 마무리됐어요. 새로고침하면 다시 시작해요.');
         }
       };
+
+      function endSession(text) {
+        const input = document.getElementById('msg');
+        input.disabled = true;
+        input.placeholder = text;
+      }
+
+      ws.onclose = () => endSession('연결이 끊겼어요. 새로고침하면 다시 시작해요.');
+      ws.onerror = () => endSession('연결 오류가 났어요. 새로고침하면 다시 시작해요.');
 
       document.getElementById('form').onsubmit = (e) => {
         e.preventDefault();

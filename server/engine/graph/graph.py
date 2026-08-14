@@ -92,6 +92,9 @@ def limit_sentences(text: str, max_sentences: int = MAX_SENTENCES) -> str:
     count = 0
     for i, ch in enumerate(text):
         if ch in _SENTENCE_END:
+            # 소수점(숫자.숫자)은 문장 끝이 아니다 (예: 3.5시간)
+            if ch == '.' and text[i - 1 : i].isdigit() and text[i + 1 : i + 2].isdigit():
+                continue
             # 연속 부호('?!', '...')는 한 문장의 끝으로 묶는다
             if i + 1 < len(text) and text[i + 1] in _SENTENCE_END:
                 continue

@@ -70,6 +70,26 @@ def test_supervisor_bad_json_falls_back():
     assert out['current_speaker'] == 'ai_b'  # 파싱 실패 → 기계적 교대
 
 
+def test_supervisor_api_error_falls_back():
+    # LLM 호출 자체가 던지는 예외(429/500/네트워크)도 세션을 죽이지 않고 폴백
+    class Boom:
+        def complete(self, system: str, user: str) -> str:
+            raise RuntimeError('api 500')
+
+    out = select_next(_state('ai_a', 1), Boom())
+    assert out['current_speaker'] == 'ai_b'
+
+
+def test_fallback_after_user_avoids_last_ai_speaker():
+    # 유저 발화 직후엔 이력의 마지막 AI(끊긴 화자)의 반대를 고른다 — ai_a 고정 아님
+    state = _state('user', 0)
+    state['messages'] = [
+        {'speaker': 'ai_a', 'text': 'x', 'ts': 0.0, 'interrupted': True},
+        {'speaker': 'user', 'text': 'y', 'ts': 0.0, 'interrupted': False},
+    ]
+    assert select_next(state)['current_speaker'] == 'ai_b'
+
+
 def test_graph_one_pass():
     g = build_graph()
     result = g.invoke(_state(None))

@@ -108,29 +108,39 @@ def create_app(
             {stream_task, recv_task}, return_when=asyncio.FIRST_COMPLETED
         )
 
-        # 유저가 스트림 도중 끼어듦 → barge-in (부분 발화는 음성 합성하지 않음)
-        if recv_task in done and not recv_task.cancelled():
-            stream_task.cancel()
+        async def _cancel(task) -> None:
+            task.cancel()
             try:
-                await stream_task
+                await task
             except asyncio.CancelledError:
                 pass
+
+        # 스트림이 아직이면(유저 메시지가 먼저 도착) → barge-in.
+        # 스트림이 이미 끝났으면(동시 완료 포함) 정상/에러 경로로 — 완료된 발화를 끊김 처리하지 않는다.
+        if not stream_task.done():
+            await _cancel(stream_task)
             partial = _strip_speaker_prefix(''.join(parts), name)
             await ws.send_json({'type': 'interrupted', 'speaker': speaker, 'text': partial})
-            state = _apply_utterance(state, speaker, partial, interrupted=True)
+            if partial:  # 빈 부분 발화는 이력에 남기지 않는다(프롬프트 오염 방지)
+                state = _apply_utterance(state, speaker, partial, interrupted=True)
             return state, recv_task.result()
 
-        # 정상 완료 → 대기 중이던 수신 취소 + 음성 합성
-        recv_task.cancel()
-        try:
-            await recv_task
-        except asyncio.CancelledError:
-            pass
+        # 스트림 완료 — 동시에 도착한 유저 메시지는 있으면 다음 턴으로 넘긴다
+        barge = recv_task.result() if recv_task.done() and not recv_task.cancelled() else None
+        if barge is None:
+            await _cancel(recv_task)
+
+        # 스트림이 에러로 끝났으면 부분 발화를 확정하지 않는다(빈/잘린 발화의 이력 오염 방지)
+        if stream_task.exception() is not None:
+            print(f'[stream] 발화 생성 실패({type(stream_task.exception()).__name__}) — 턴 건너뜀')
+            await ws.send_json({'type': 'error', 'speaker': speaker})
+            return state, barge
+
         # 최종본 확정: 프리픽스 제거 + 문장 상한(§1.4) — FE는 end에서 이 최종본으로 교체
         text = finalize_utterance(''.join(parts), name)
         audio = await _synthesize(speaker, text)
         await ws.send_json({'type': 'end', 'speaker': speaker, 'text': text, 'audio': audio})
-        return _apply_utterance(state, speaker, text), None
+        return _apply_utterance(state, speaker, text), barge
 
     @app.websocket('/ws')
     async def chat(ws: WebSocket) -> None:
@@ -154,12 +164,12 @@ def create_app(
                 state, barge = await _stream_turn(state, ws, finish=finish)
                 turn += 1
 
-                if barge is not None:
-                    pending_user = barge  # 개입 발화를 다음 턴에 반영(세션 이어감)
-                    continue
+                # 세션 캡이 barge보다 우선 — 마무리 턴에 끼어들어도 세션은 종료된다
                 if finish:
                     await ws.send_json({'type': 'done'})
                     break
+                if barge is not None:
+                    pending_user = barge  # 개입 발화를 다음 턴에 반영(세션 이어감)
         except WebSocketDisconnect:
             return
 

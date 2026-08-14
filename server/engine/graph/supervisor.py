@@ -10,13 +10,22 @@ from ..personas.loader import load_personas
 from .state import ConvState
 
 
-def _mechanical_next(prev: str | None) -> str:
-    """LLM 없이 쓰는 기계적 교대 (직전 화자의 반대 AI)."""
+def _mechanical_next(prev: str | None, messages: list | None = None) -> str:
+    """LLM 없이 쓰는 기계적 교대 (직전 화자의 반대 AI).
+
+    유저 발화 직후엔 이력에서 마지막 AI 화자를 찾아 그 반대를 고른다
+    — 끊긴 화자가 곧바로 또 말하는 것을 막는다.
+    """
     if prev == 'ai_a':
         return 'ai_b'
     if prev == 'ai_b':
         return 'ai_a'
-    return 'ai_a'  # 첫 턴 또는 유저 직후
+    for m in reversed(messages or []):  # 유저 턴을 건너뛰고 마지막 AI를 찾는다
+        if m['speaker'] == 'ai_a':
+            return 'ai_b'
+        if m['speaker'] == 'ai_b':
+            return 'ai_a'
+    return 'ai_a'  # 첫 턴
 
 
 def build_supervisor_prompt(state: ConvState) -> tuple[str, str]:
@@ -49,20 +58,22 @@ def select_next(state: ConvState, client=None) -> dict:
     어느 경우든 규칙 가드(직전 화자 연속 금지)를 항상 적용한다.
     """
     prev = state['current_speaker']
+    messages = state['messages']
     intent = None
 
     if client is None:
-        nxt = _mechanical_next(prev)
+        nxt = _mechanical_next(prev, messages)
     else:
         try:
             decision = json.loads(client.complete(*build_supervisor_prompt(state)))
             nxt = decision['next_speaker']
             intent = decision.get('intent')
-        except (json.JSONDecodeError, KeyError, TypeError):
-            nxt = _mechanical_next(prev)
+        except Exception:  # LLM 호출 실패(429/500/네트워크)·파싱 실패 모두 기계적 교대로 폴백
+            print('[supervisor] 판단 실패 — 기계적 교대로 폴백')
+            nxt = _mechanical_next(prev, messages)
         # 규칙 가드: 유효하지 않거나 직전 화자와 같으면 강제 교체
         if nxt not in ('ai_a', 'ai_b') or (nxt == prev and prev in ('ai_a', 'ai_b')):
-            nxt = _mechanical_next(prev)
+            nxt = _mechanical_next(prev, messages)
 
     # 유저·시작 직후면 AI 연속 카운터를 1로, AI가 이어가면 증가
     consecutive = 1 if prev in (None, 'user') else state['consecutive_ai_turns'] + 1

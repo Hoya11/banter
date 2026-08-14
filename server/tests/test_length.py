@@ -20,6 +20,12 @@ def test_no_punctuation_passes_through():
     assert limit_sentences('그치 완전 맞아') == '그치 완전 맞아'
 
 
+def test_decimal_point_not_sentence_end():
+    # 소수점은 문장 끝이 아니다 — "2.5랑 3."으로 파손되던 회귀 방지
+    assert limit_sentences('2.5랑 3.5 중에 뭐가 나아? 난 몰라.') == '2.5랑 3.5 중에 뭐가 나아? 난 몰라.'
+    assert limit_sentences('어제 3.5시간 잤어. 진짜 죽겠다. 셋째는 잘림.') == '어제 3.5시간 잤어. 진짜 죽겠다.'
+
+
 def test_consecutive_marks_count_as_one():
     # '?!'나 '...'는 한 문장의 끝
     text = '진짜?! 대박이다... 이건 잘려야지. 넷째.'
