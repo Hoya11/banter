@@ -22,14 +22,20 @@ class ElevenLabsClient:
         if not self._key:
             raise RuntimeError('ELEVENLABS_API_KEY가 없다 — server/.env에 설정하라')
         self._model_id = model_id  # 한국어는 multilingual v2 (저지연은 flash 계열)
+        # 커넥션 재사용 — 요청마다 새 클라이언트를 만들면 TLS 핸드셰이크로
+        # 턴당 100~300ms가 추가돼 실시간 대화 지연에 그대로 얹힌다
+        self._http = httpx.AsyncClient(timeout=httpx.Timeout(10, connect=3))
 
     async def synthesize(self, text: str, voice: str) -> bytes:
         """voice=ElevenLabs voice_id. mp3 bytes를 반환한다."""
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                f'{ELEVEN_URL}/{voice}',
-                headers={'xi-api-key': self._key, 'accept': 'audio/mpeg'},
-                json={'text': text, 'model_id': self._model_id},
-            )
-            resp.raise_for_status()
-            return resp.content
+        resp = await self._http.post(
+            f'{ELEVEN_URL}/{voice}',
+            headers={'xi-api-key': self._key, 'accept': 'audio/mpeg'},
+            json={'text': text, 'model_id': self._model_id},
+        )
+        resp.raise_for_status()
+        return resp.content
+
+    async def aclose(self) -> None:
+        """공유 HTTP 클라이언트를 닫는다 (앱 종료 시)."""
+        await self._http.aclose()

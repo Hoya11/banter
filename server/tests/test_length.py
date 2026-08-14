@@ -35,3 +35,10 @@ def test_consecutive_marks_count_as_one():
 def test_finalize_strips_prefix_then_limits():
     raw = '도현: 하나. 둘. 셋.'
     assert finalize_utterance(raw, '도현') == '하나. 둘.'
+
+
+def test_question_after_limit_is_preserved():
+    # 상한 직후 문장이 질문이면 살린다 — 유저 소환 질문(§1.3)이 상한(§1.4)에 잘리는 충돌 방지
+    assert limit_sentences('헐. 진짜? 그래서 넌 어땠어?') == '헐. 진짜? 그래서 넌 어땠어?'
+    # 질문이 아니면 원래대로 상한 적용
+    assert limit_sentences('하나. 둘. 셋이다. 넷.') == '하나. 둘.'

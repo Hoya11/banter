@@ -28,6 +28,17 @@ def _mechanical_next(prev: str | None, messages: list | None = None) -> str:
     return 'ai_a'  # 첫 턴
 
 
+def _sanitize_intent(intent) -> str | None:
+    """supervisor가 만든 intent를 발화 프롬프트에 넣기 전에 정제한다.
+
+    intent는 (유저 발화가 섞인 이력을 본) LLM의 자유 출력이라 그대로 삽입하면
+    타입 오류·프롬프트 인젝션 통로가 된다. 문자열만 허용, 개행 제거, 길이 제한.
+    """
+    if not isinstance(intent, str) or not intent.strip():
+        return None
+    return intent.replace('\n', ' ').strip()[:100]
+
+
 def build_supervisor_prompt(state: ConvState) -> tuple[str, str]:
     """이력·로스터로 supervisor 판단용 (system, user) 프롬프트를 만든다."""
     personas = load_personas()
@@ -67,7 +78,7 @@ def select_next(state: ConvState, client=None) -> dict:
         try:
             decision = json.loads(client.complete(*build_supervisor_prompt(state)))
             nxt = decision['next_speaker']
-            intent = decision.get('intent')
+            intent = _sanitize_intent(decision.get('intent'))
         except Exception:  # LLM 호출 실패(429/500/네트워크)·파싱 실패 모두 기계적 교대로 폴백
             print('[supervisor] 판단 실패 — 기계적 교대로 폴백')
             nxt = _mechanical_next(prev, messages)

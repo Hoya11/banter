@@ -61,6 +61,22 @@ def test_supervisor_intent_is_passed_through():
     assert out['current_intent'] == '반박'
 
 
+def test_supervisor_sanitizes_bad_intent():
+    # intent가 문자열이 아니거나(주입 통로) 너무 길면 정제된다
+    class DictIntent:
+        def complete(self, system: str, user: str) -> str:
+            return '{"next_speaker": "ai_b", "intent": {"x": 1}}'
+
+    assert select_next(_state('ai_a', 1), DictIntent())['current_intent'] is None
+
+    class LongIntent:
+        def complete(self, system: str, user: str) -> str:
+            return '{"next_speaker": "ai_b", "intent": "' + '가' * 300 + '"}'
+
+    out = select_next(_state('ai_a', 1), LongIntent())
+    assert len(out['current_intent']) <= 100
+
+
 def test_supervisor_bad_json_falls_back():
     class Broken:
         def complete(self, system: str, user: str) -> str:

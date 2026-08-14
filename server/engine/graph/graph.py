@@ -89,7 +89,7 @@ def limit_sentences(text: str, max_sentences: int = MAX_SENTENCES) -> str:
 
     종결부호(.!?…) 기준으로 자르되, 부호 없는 짧은 반말체(예: '그치')는 그대로 둔다.
     """
-    count = 0
+    ends = []  # 문장 끝 인덱스 목록
     for i, ch in enumerate(text):
         if ch in _SENTENCE_END:
             # 소수점(숫자.숫자)은 문장 끝이 아니다 (예: 3.5시간)
@@ -98,10 +98,17 @@ def limit_sentences(text: str, max_sentences: int = MAX_SENTENCES) -> str:
             # 연속 부호('?!', '...')는 한 문장의 끝으로 묶는다
             if i + 1 < len(text) and text[i + 1] in _SENTENCE_END:
                 continue
-            count += 1
-            if count >= max_sentences:
-                return text[: i + 1].strip()
-    return text.strip()
+            ends.append(i)
+    if len(ends) <= max_sentences:
+        return text.strip()
+    # 상한 초과 — 단, 바로 다음 문장이 질문(?)이면 한 문장 더 허용한다.
+    # 유저 소환 발화가 "리액션. 리액션. 너는 어땠어?" 꼴일 때 질문이 잘리면
+    # 소외 방지 장치(§1.3)가 상한(§1.4)에 무력화되기 때문.
+    cut = ends[max_sentences - 1]
+    nxt = ends[max_sentences]
+    if text[nxt] == '?':
+        cut = nxt
+    return text[: cut + 1].strip()
 
 
 def finalize_utterance(raw: str, name: str) -> str:
