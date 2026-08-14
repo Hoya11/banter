@@ -50,7 +50,7 @@ judge 모델: gpt-4o-mini / 발화: gpt-4o-mini(temp 0.9) / go 컷: 평균 ≥7.
 | user_participates | GO | 8.2 | 7 | |
 | topic_switch | GO | 7.6 | 7 | |
 | radio_silence | GO | 7.6 | 7 | user_incl 5(직전)→8 — 변동 |
-| barge_in | GO | 7.6 | 7 | 끼어들기 수습 작동 |
+| barge_in | GO | 7.6 | 7 | ⚠️ 무효 — 아래 정정 참고 |
 | **전체** | | **7.75** | | 4/4 GO |
 
 ### 관찰
@@ -75,6 +75,9 @@ judge 모델: gpt-4o-mini / 발화: gpt-4o-mini(temp 0.9) / go 컷: 평균 ≥7.
 - **radio_silence의 진짜 user_inclusion은 5 (NO-GO), 5회 반복 모두 고정.** 직전 1회 측정의 8(GO)은 **이상치**였다.
 - **반복 측정이 "거짓 GO"를 걸러냄** — n=1 판정이면 "라디오도 GO"라는 틀린 결론을 냈을 것. 신뢰성 측정의 핵심 가치.
 - 부수 발견: judge가 overall_comment를 scores 안에 넣는 구조 오류가 있었음 → 파싱 복구 + 반복 채점 실패 격리로 대응(fix).
+
+### 정정 (2026-08-14 코드 검수에서 발견)
+- **barge_in 시나리오의 GO 7.6은 §2.1 수습 능력의 증거가 아니다.** harness의 `_interrupt`가 발화 텍스트를 자르지 않고 플래그만 달았고, judge 입력(`Turn`)이 그 플래그마저 버려서 — judge는 "완결 발화 → 유저 발화"인 평범한 대화를 채점했다. 끼어들기 수습의 실제 평가는 `_interrupt`의 텍스트 절단 + `Turn.interrupted` 전달을 구현한 뒤 재측정해야 한다.
 
 ### Phase 1 판정 (신뢰구간 확인 후)
 - user_participates GO 8.2 / topic_switch GO 7.6 / barge_in GO 7.6 — 유저 상호작용 시나리오 전부 GO.
