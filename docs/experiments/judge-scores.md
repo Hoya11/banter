@@ -79,6 +79,23 @@ judge 모델: gpt-4o-mini / 발화: gpt-4o-mini(temp 0.9) / go 컷: 평균 ≥7.
 ### 정정 (2026-08-14 코드 검수에서 발견)
 - **barge_in 시나리오의 GO 7.6은 §2.1 수습 능력의 증거가 아니다.** harness의 `_interrupt`가 발화 텍스트를 자르지 않고 플래그만 달았고, judge 입력(`Turn`)이 그 플래그마저 버려서 — judge는 "완결 발화 → 유저 발화"인 평범한 대화를 채점했다. 끼어들기 수습의 실제 평가는 `_interrupt`의 텍스트 절단 + `Turn.interrupted` 전달을 구현한 뒤 재측정해야 한다.
 
+## 2026-08-25 — barge_in 재측정 (재구현 후, 정정 완결)
+
+harness가 발화를 실제 절단하고 Turn.interrupted가 judge까지 전달되는 상태에서 재측정.
+
+| 시나리오 | 판정 | 평균 | context_on_interrupt | user_incl | liveliness |
+|---|---|---|---|---|---|
+| user_participates | GO | 7.6 | 7 | 8 | 6 |
+| topic_switch | NO-GO | 7.0 | 7 | 5 | 6 |
+| radio_silence | NO-GO | 7.0 | 7 | 5 | 6 |
+| **barge_in** | **GO** | **7.6** | **7** | 8 | 6 |
+| 전체 | | 7.30 | | | |
+
+### 결론
+- **barge_in GO 7.6은 이번엔 유효** — judge가 잘린 발화와 [말하다 끊김]을 보고 "끼어들기에 자연스럽게 반응, 약간의 맥락 손실"로 채점. §2.1 수습 능력이 측정으로 확인됨. 무효 정정(위) 루프 완결.
+- 1회 측정이라 개별 시나리오 등락(topic_switch 7.6→7.0 등)은 변동 범위로 해석.
+- **liveliness가 전 시나리오 6으로 일관 하락** — 변동이 아니라 패턴. "단조·동의 반복" 지적이 공통. 문장 2개 상한·태그 프롬프트 추가가 티키타카 리듬에 영향 줬을 가능성 → 다음 튜닝 타깃 1순위.
+
 ### Phase 1 판정 (신뢰구간 확인 후)
 - user_participates GO 8.2 / topic_switch GO 7.6 / barge_in GO 7.6 — 유저 상호작용 시나리오 전부 GO.
 - radio_silence NO-GO — 유저 발화 0개의 구조적 결과. 라디오 모드 user_inclusion 평가는 정교화 대상(실제 실패 아님).
