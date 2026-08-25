@@ -1,8 +1,11 @@
 """페르소나 로딩 + 발화 프롬프트 구성.
 
 duo.yaml을 읽어 Persona로 검증하고, 발화 생성용 system 프롬프트를 만든다.
+보이스는 개별이 아니라 쌍 단위 프리셋(voice_presets)으로 관리한다 — 케미가
+쌍 단위이듯(D-004) 목소리 대비(청각적 화자 구분)도 쌍으로 튜닝하기 때문.
 """
 
+from functools import lru_cache
 from pathlib import Path
 
 import yaml
@@ -12,12 +15,28 @@ from .schema import Persona
 DUO_PATH = Path(__file__).parent / 'duo.yaml'
 
 
+def _resolve_voices(data: dict) -> dict[str, str | None]:
+    """활성 voice_preset의 {화자키: voice_id}를 푼다. 프리셋 미지정이면 빈 매핑."""
+    preset = data.get('voice_preset')
+    if not preset:
+        return {}
+    presets = data.get('voice_presets') or {}
+    if preset not in presets:
+        raise ValueError(f'voice_preset "{preset}"이 voice_presets에 없다')
+    return presets[preset]
+
+
+@lru_cache(maxsize=1)  # 매 발화마다 파일 IO를 반복하지 않는다 (이벤트 루프 블로킹 방지)
 def load_personas() -> dict[str, Persona]:
-    """duo.yaml의 듀오를 {key: Persona}로 로드한다."""
+    """duo.yaml의 듀오를 {key: Persona}로 로드한다 (voice는 활성 프리셋에서 주입)."""
     data = yaml.safe_load(DUO_PATH.read_text(encoding='utf-8'))
     if not data or 'personas' not in data:
         raise ValueError('duo.yaml에 personas가 없다')
-    return {key: Persona(**val) for key, val in data['personas'].items()}
+    voices = _resolve_voices(data)
+    return {
+        key: Persona(**val, voice_id=voices.get(key))
+        for key, val in data['personas'].items()
+    }
 
 
 def get_persona(speaker: str) -> Persona:

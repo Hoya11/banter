@@ -15,8 +15,8 @@ load_dotenv()
 app = create_app(
     utterance_client=OpenAIClient(model='gpt-5.6-luna', temperature=None),  # 발화 생성(temp 고정 모델)
     supervisor_client=OpenAIClient(json_mode=True),  # 화자 선정(gpt-4o-mini, 비용 절약)
-    # TTS provider 선택 — 개발 기본은 끔(텍스트만, 크레딧 0). 데모/청음 때만 켠다:
-    # tts_client=OpenAIClient(),  # OpenAI (voice: ash/coral 필요, 영어 최적)
-    # tts_client=ElevenLabsClient(model_id='eleven_multilingual_v2'),  # ElevenLabs (한국어, 결제 필요)
-    tts_client=None,
+    # TTS provider 선택 — 음성 없이 개발하려면 tts_client=None으로.
+    # 보이스 조합은 duo.yaml의 voice_preset (chris-jessica | liam-laura).
+    # premade 보이스 × v3는 무료 플랜에서 사용 가능 확인(2026-08 청음 비교).
+    tts_client=ElevenLabsClient(model_id='eleven_v3'),
 )

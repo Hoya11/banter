@@ -6,12 +6,34 @@
 
 import pytest
 
-from engine.personas.loader import build_persona_prompt, get_persona, load_personas
+from engine.personas.loader import (
+    _resolve_voices,
+    build_persona_prompt,
+    get_persona,
+    load_personas,
+)
 
 
 def test_loads_duo():
     personas = load_personas()
     assert set(personas) == {'ai_a', 'ai_b'}
+
+
+def test_active_preset_injects_voices():
+    # 활성 프리셋(chris-jessica)의 voice_id가 페르소나에 주입된다
+    personas = load_personas()
+    assert personas['ai_a'].voice_id == 'iP95p4xoKVk53GoZ742B'  # Chris
+    assert personas['ai_b'].voice_id == 'cgSgspJ2msm6clMCkdW9'  # Jessica
+
+
+def test_resolve_voices_unknown_preset_raises():
+    with pytest.raises(ValueError):
+        _resolve_voices({'voice_preset': '없는조합', 'voice_presets': {'a': {}}})
+
+
+def test_resolve_voices_without_preset_is_empty():
+    # 프리셋 미지정이면 voice 없이 로드된다 (텍스트 전용 개발 모드 허용)
+    assert _resolve_voices({}) == {}
 
 
 def test_stances_contrast():
