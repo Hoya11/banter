@@ -24,6 +24,7 @@ class OpenAIClient:
         json_mode: bool = False,
         temperature: float = 0.0,
         tts_model: str = 'tts-1',
+        stt_model: str = 'whisper-1',
     ):
         key = api_key or os.environ.get('OPENAI_API_KEY')
         if not key:
@@ -35,6 +36,7 @@ class OpenAIClient:
         self._json = json_mode  # judge=True(순수 JSON), 발화=False(자유 텍스트)
         self._temperature = temperature  # judge=0(재현성), 발화=높게(다양성)
         self._tts_model = tts_model  # TTS 모델 (예: tts-1, tts-1-hd, gpt-4o-mini-tts)
+        self._stt_model = stt_model  # STT 모델 (예: whisper-1, gpt-4o-mini-transcribe)
 
     def complete(self, system: str, user: str) -> str:
         kwargs = {}
@@ -74,6 +76,20 @@ class OpenAIClient:
             delta = chunk.choices[0].delta.content
             if delta:
                 yield delta
+
+    async def transcribe(self, audio: bytes, mime: str = 'audio/webm') -> str:
+        """음성(bytes)을 한국어 텍스트로 전사한다 (STT)."""
+        from openai import AsyncOpenAI
+
+        if self._async_client is None:
+            self._async_client = AsyncOpenAI(api_key=self._api_key)
+        ext = mime.split('/')[-1].split(';')[0] or 'webm'
+        resp = await self._async_client.audio.transcriptions.create(
+            model=self._stt_model,
+            file=(f'speech.{ext}', audio, mime),
+            language='ko',
+        )
+        return (resp.text or '').strip()
 
     async def synthesize(self, text: str, voice: str, speed: float | None = None) -> bytes:
         """텍스트를 음성(mp3 bytes)으로 합성한다 (TTS)."""

@@ -49,6 +49,7 @@ def _parse_incoming(raw: str) -> tuple[str, object]:
 
     - {"type":"played","seq":N} → ('played', N)
     - {"type":"say","text":...} → ('say', text) — 공백뿐이면 noop
+    - {"type":"voice","audio":b64,"mime":...} → ('voice', {...}) — STT 대상
     - 그 외 JSON(미지 type·null 등) → ('noop', None): 유저 발화로 오인해
       이력을 오염시키지 않는다. JSON이 아닌 일반 텍스트만 say로 폴백.
     """
@@ -64,6 +65,8 @@ def _parse_incoming(raw: str) -> tuple[str, object]:
         if data.get('type') == 'say':
             text = str(data.get('text') or '').strip()
             return ('say', text) if text else ('noop', None)
+        if data.get('type') == 'voice' and data.get('audio'):
+            return 'voice', {'audio': data['audio'], 'mime': data.get('mime') or 'audio/webm'}
     return 'noop', None
 
 
@@ -92,11 +95,12 @@ def create_app(
     utterance_client=None,
     supervisor_client=None,
     tts_client=None,
+    stt_client=None,
     max_turns: int = MAX_TURNS,
     radio_sec: float = RADIO_SEC,
     ack_sec: float = ACK_SEC,
 ) -> FastAPI:
-    """WS 채팅 앱을 만든다. LLM/TTS client를 주입받아(테스트는 fake) 엔진을 구동한다."""
+    """WS 채팅 앱을 만든다. LLM/TTS/STT client를 주입받아(테스트는 fake) 엔진을 구동한다."""
     app = FastAPI()
     voice_mode = tts_client is not None
 
@@ -147,6 +151,28 @@ def create_app(
                 return  # 연결이 닫혔으면 워커 종료
             finally:
                 queue.task_done()
+
+    async def _incoming(ws: WebSocket, raw: str) -> tuple[str, object]:
+        """수신 메시지를 해석한다. voice(마이크 녹음)는 STT로 전사해 say로 합류시킨다.
+
+        전사 결과는 {'you', text}로 echo — 유저가 자기 발화 인식 결과를 확인.
+        STT 미설정·실패·빈 전사는 noop (대화 오염 방지).
+        """
+        kind, value = _parse_incoming(raw)
+        if kind != 'voice':
+            return kind, value
+        if stt_client is None:
+            return 'noop', None
+        try:
+            audio = base64.b64decode(value['audio'])
+            text = await stt_client.transcribe(audio, value['mime'])
+        except Exception as exc:
+            print(f'[stt] 전사 실패({type(exc).__name__}) — 무시')
+            return 'noop', None
+        if not text:
+            return 'noop', None
+        await ws.send_json({'type': 'you', 'text': text})
+        return 'say', text
 
     async def _flush_stale(ws: WebSocket, ctx: dict) -> None:
         """유저 발화 반영 시점 이전의 오디오를 FE가 버리게 한다.
@@ -267,7 +293,7 @@ def create_app(
                     {stream_task, recv_task}, return_when=asyncio.FIRST_COMPLETED
                 )
                 if recv_task in done:
-                    kind, value = _parse_incoming(recv_task.result())
+                    kind, value = await _incoming(ws, recv_task.result())
                     if kind == 'say':
                         barge = value
                         break
@@ -331,7 +357,7 @@ def create_app(
                 raw = await asyncio.wait_for(ws.receive_text(), timeout=remain)
             except asyncio.TimeoutError:
                 continue  # deadline 검사로 되돌아감
-            kind, value = _parse_incoming(raw)
+            kind, value = await _incoming(ws, raw)
             if kind == 'say':
                 return value
             if kind == 'played':
@@ -340,7 +366,9 @@ def create_app(
     @app.websocket('/ws')
     async def chat(ws: WebSocket) -> None:
         await ws.accept()
-        await ws.send_json({'type': 'hello', 'voice': voice_mode})
+        await ws.send_json(
+            {'type': 'hello', 'voice': voice_mode, 'stt': stt_client is not None}
+        )
         state = initial_state()
         turn = 0
         pending_user = None  # barge-in으로 받은 유저 발화(다음 턴에 반영)

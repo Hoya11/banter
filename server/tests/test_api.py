@@ -22,7 +22,7 @@ def test_ws_streams_tokens_then_end():
     app = create_app(FakeStream())  # supervisor None → 기계적 교대(첫 턴 ai_a)
     client = TestClient(app)
     with client.websocket_connect('/ws') as ws:
-        assert ws.receive_json() == {'type': 'hello', 'voice': False}  # 접속 시 모드 안내
+        assert ws.receive_json() == {'type': 'hello', 'voice': False, 'stt': False}  # 접속 시 모드 안내
         ws.send_text('하이')
         assert ws.receive_json() == {'type': 'start', 'speaker': 'ai_a'}
         assert ws.receive_json() == {'type': 'token', 'text': '안'}
@@ -137,7 +137,7 @@ def test_ws_audio_follows_end_when_tts():
     app = create_app(FakeStream(), tts_client=FakeTTS())
     client = TestClient(app)
     with client.websocket_connect('/ws') as ws:
-        assert ws.receive_json() == {'type': 'hello', 'voice': True}  # 음성 모드 안내
+        assert ws.receive_json() == {'type': 'hello', 'voice': True, 'stt': False}  # 음성 모드 안내
         ws.send_text('하이')
         assert ws.receive_json()['type'] == 'start'
         ws.receive_json()  # token 안
@@ -220,6 +220,39 @@ def test_ws_user_say_discards_prefetch_and_reaches_prompt():
             if msg['type'] == 'end':
                 break
         assert any('프리페치버려라42' in p for p in rec.prompts)  # 유저 발화가 프롬프트에 반영
+
+
+def test_ws_voice_message_transcribed_and_joins_as_say():
+    # 🎤 voice 메시지 → STT 전사 → 'you' echo → 유저 발화로 대화 합류 (기존 say 파이프 재사용)
+    import json as _json
+
+    class FakeSTT:
+        async def transcribe(self, audio: bytes, mime: str = 'audio/webm') -> str:
+            assert audio == b'AUDIODATA'
+            return '음성으로 말했어요'
+
+    class RecStream:
+        def __init__(self):
+            self.prompts = []
+
+        async def complete_stream(self, system: str, user: str):
+            self.prompts.append(user)
+            yield '응'
+
+    rec = RecStream()
+    app = create_app(rec, stt_client=FakeSTT(), max_turns=5, radio_sec=100)
+    client = TestClient(app)
+    with client.websocket_connect('/ws') as ws:
+        hello = ws.receive_json()
+        assert hello['stt'] is True  # FE가 🎤 버튼을 보여줄 근거
+        b64 = base64.b64encode(b'AUDIODATA').decode('ascii')
+        ws.send_text(_json.dumps({'type': 'voice', 'audio': b64, 'mime': 'audio/webm'}))
+        assert ws.receive_json() == {'type': 'you', 'text': '음성으로 말했어요'}  # 전사 echo
+        assert ws.receive_json()['type'] == 'start'  # 전사가 유저 발화로 처리돼 턴 시작
+        for _ in range(5):
+            if ws.receive_json()['type'] == 'end':
+                break
+        assert any('음성으로 말했어요' in p for p in rec.prompts)  # 프롬프트 반영
 
 
 def test_ws_prefetch_serves_next_turn_without_tokens():

@@ -24,12 +24,15 @@
       form { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid #8883; }
       input { flex: 1; padding: 10px; border-radius: 8px; border: 1px solid #8886; font-size: 15px; }
       button { padding: 10px 16px; border: 0; border-radius: 8px; background: #2563eb; color: #fff; font-size: 15px; }
+      #mic { background: #8884; }
+      #mic.rec { background: #dc2626; }
     </style>
   </head>
   <body>
     <header>banter — 도현 · 소은과 수다</header>
     <div id="log"></div>
     <form id="form">
+      <button type="button" id="mic" hidden title="누르는 동안 녹음돼요">🎤</button>
       <input id="msg" autocomplete="off" placeholder="말 걸거나 끼어들어보세요…" />
       <button>전송</button>
     </form>
@@ -155,6 +158,9 @@
         const d = JSON.parse(e.data);
         if (d.type === 'hello') {
           voiceMode = d.voice; // 음성 모드면 토큰 라이브 표시 대신 오디오 동기 표시
+          if (d.stt) document.getElementById('mic').hidden = false; // 🎤 push-to-talk
+        } else if (d.type === 'you') {
+          add('user', d.text); // 내 음성의 전사 결과 (서버 echo)
         } else if (d.type === 'start') {
           current = voiceMode ? null : add(d.speaker, '');
         } else if (d.type === 'token') {
@@ -193,6 +199,43 @@
 
       ws.onclose = () => { if (!sessionEnded) endSession('연결이 끊겼어요. 새로고침하면 다시 시작해요.'); };
       ws.onerror = () => { if (!sessionEnded) endSession('연결 오류가 났어요. 새로고침하면 다시 시작해요.'); };
+
+      // 🎤 push-to-talk: 누르는 동안 녹음 → 떼면 서버로 전송 → STT → 대화 합류
+      const micBtn = document.getElementById('mic');
+      let recorder = null;
+      let chunks = [];
+      async function startRec() {
+        stopAudio(); // 말하려는 순간 AI 목소리를 끊는다 (barge)
+        unlockAudio();
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          chunks = [];
+          recorder = new MediaRecorder(stream);
+          recorder.ondataavailable = (e) => chunks.push(e.data);
+          recorder.onstop = async () => {
+            stream.getTracks().forEach((t) => t.stop());
+            const blob = new Blob(chunks, { type: recorder.mimeType });
+            if (blob.size < 1500) return; // 스치듯 눌린 짧은 녹음은 무시
+            const b64 = await new Promise((res) => {
+              const r = new FileReader();
+              r.onload = () => res(r.result.split(',')[1]);
+              r.readAsDataURL(blob);
+            });
+            ws.send(JSON.stringify({ type: 'voice', audio: b64, mime: recorder.mimeType }));
+          };
+          recorder.start();
+          micBtn.classList.add('rec');
+        } catch (e) {
+          alert('마이크 권한이 필요해요');
+        }
+      }
+      function stopRec() {
+        if (recorder && recorder.state === 'recording') recorder.stop();
+        micBtn.classList.remove('rec');
+      }
+      micBtn.onpointerdown = startRec;
+      micBtn.onpointerup = stopRec;
+      micBtn.onpointerleave = stopRec;
 
       document.getElementById('form').onsubmit = (e) => {
         e.preventDefault();
