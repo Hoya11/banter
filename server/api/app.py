@@ -463,6 +463,8 @@ def create_app(
                         pre = await prefetch
                         state = await _commit_prefetched(state, ws, ctx, pre)
                         barge = None
+                    except WebSocketDisconnect:
+                        raise  # 연결 끊김은 폴백 대상이 아니다 — 닫힌 소켓에 재전송 금지
                     except Exception:  # 준비 실패 시 실시간 경로로 폴백
                         state, barge = await _stream_turn(state, ws, ctx, finish=finish)
                     prefetch = None
