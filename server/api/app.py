@@ -6,6 +6,9 @@
 - 음성 동기(voice mode): 소리가 주인공 — 발화 텍스트는 FE가 오디오 재생 시점에
   표시하고(자막), FE의 played ack을 받아야 다음 라디오 턴을 진행한다.
   서버가 재생보다 앞서 달려 "채팅이 먼저 쌓이고 소리가 뒤늦게 읽는" 어긋남을 막는다.
+- prefetch(§3.2): 현재 발화가 재생되는 동안 다음 AI 턴(화자선정→대사→합성)을
+  백그라운드로 완성해 둔다 — AI끼리의 티키타카는 체감 지연이 0에 수렴.
+  유저가 개입하면 폐기하고 실시간 경로로 반응한다.
 
 서버→FE: {hello,voice} {start,speaker} {token,text}* {end,speaker,text}
         {audio,speaker,text,audio|null} {interrupted,...} {error,...} {done}
@@ -197,6 +200,54 @@ def create_app(
             await ctx['tts_queue'].put((speaker, clean, tagged))
         return _apply_utterance(state, speaker, clean), barge
 
+    async def _prefetch_turn(state: dict, finish: bool = False) -> dict:
+        """다음 AI 턴을 미리 통째로 계산한다 — 이벤트 전송 없음 (§3.2 prefetch).
+
+        현재 발화가 재생되는 동안 백그라운드에서 화자선정→대사→합성까지 끝내
+        재생 종료 시 즉시 방출할 완성품을 만든다. 유저가 개입하면 폐기된다
+        (유저 침묵 전제로 만든 맥락이라 재사용 불가 — prefetch의 비용).
+        """
+        loop = asyncio.get_event_loop()
+        sel = await loop.run_in_executor(None, select_next, state, supervisor_client)
+        pre = {**state, **sel}
+        if finish:
+            pre = {**pre, 'current_intent': FINISH_INTENT}
+        system, user, speaker = prepare_utterance(pre)
+        name = get_persona(speaker).name
+        parts: list[str] = []
+        if utterance_client is None:
+            parts.append(f'({speaker} 발화 스텁)')
+        else:
+            async for token in utterance_client.complete_stream(system, user):
+                parts.append(token)
+        tagged = finalize_tagged(''.join(parts), name)
+        clean = strip_audio_tags(tagged)
+        audio = await _synthesize(speaker, tagged) if (voice_mode and clean) else None
+        return {'sel': sel, 'speaker': speaker, 'clean': clean, 'audio': audio}
+
+    async def _commit_prefetched(state: dict, ws: WebSocket, ctx: dict, pre: dict) -> dict:
+        """미리 만든 턴을 확정 방출한다 — start/end/audio를 한 번에."""
+        state = {**state, **pre['sel']}
+        speaker, clean = pre['speaker'], pre['clean']
+        await ws.send_json({'type': 'start', 'speaker': speaker})
+        await ws.send_json({'type': 'end', 'speaker': speaker, 'text': clean})
+        if voice_mode and clean:
+            ctx['inflight'] += 1
+            await ws.send_json(
+                {'type': 'audio', 'speaker': speaker, 'text': clean, 'audio': pre['audio']}
+            )
+        return _apply_utterance(state, speaker, clean)
+
+    async def _discard(task) -> None:
+        """prefetch를 폐기한다 (유저 개입 등으로 전제가 무너졌을 때)."""
+        if task is None or task.done():
+            return
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+
     async def _wait_user(
         ws: WebSocket, ctx: dict, timeout: float, until_acked: bool = False
     ) -> str | None:
@@ -231,14 +282,18 @@ def create_app(
         pending_user = None  # barge-in으로 받은 유저 발화(다음 턴에 반영)
         ctx = {'inflight': 0, 'tts_queue': asyncio.Queue()}
         worker = asyncio.create_task(_tts_worker(ws, ctx['tts_queue'], ctx))
+        prefetch = None  # 재생 중 미리 만들어두는 다음 AI 턴 (§3.2)
         try:
             while True:
+                user_spoke = False
                 if pending_user is not None:
                     state = _add_user(state, pending_user)
                     pending_user = None
+                    user_spoke = True
                 else:
                     # 음성 동기: 앞선 발화의 재생이 끝나기(played ack)를 기다린 뒤에야
                     # 라디오 침묵 타이머를 돌린다 — 서버가 재생보다 앞서 달리지 않게.
+                    # (그동안 prefetch가 백그라운드에서 다음 턴을 완성해 둔다)
                     said = None
                     if voice_mode and ctx['inflight'] > 0:
                         said = await _wait_user(ws, ctx, ACK_SEC, until_acked=True)
@@ -246,9 +301,24 @@ def create_app(
                         said = await _wait_user(ws, ctx, radio_sec)
                     if said is not None:
                         state = _add_user(state, said)
+                        user_spoke = True
 
                 finish = turn + 1 >= max_turns
-                state, barge = await _stream_turn(state, ws, ctx, finish=finish)
+                if user_spoke:
+                    # 유저가 말함 → "침묵 전제" prefetch는 무효, 실시간 경로로 반응
+                    await _discard(prefetch)
+                    prefetch = None
+                if prefetch is not None:
+                    # prefetch 히트 — 완성품을 즉시 방출 (지연 은폐)
+                    try:
+                        pre = await prefetch
+                        state = await _commit_prefetched(state, ws, ctx, pre)
+                        barge = None
+                    except Exception:  # 준비 실패 시 실시간 경로로 폴백
+                        state, barge = await _stream_turn(state, ws, ctx, finish=finish)
+                    prefetch = None
+                else:
+                    state, barge = await _stream_turn(state, ws, ctx, finish=finish)
                 turn += 1
 
                 # 세션 캡이 barge보다 우선 — 마무리 턴에 끼어들어도 세션은 종료된다
@@ -257,10 +327,16 @@ def create_app(
                     break
                 if barge is not None:
                     pending_user = barge  # 개입 발화를 다음 턴에 반영(세션 이어감)
+                elif voice_mode:
+                    # 방금 발화가 재생되는 동안 다음 턴을 미리 만든다 (마무리 여부 반영)
+                    prefetch = asyncio.create_task(
+                        _prefetch_turn(state, finish=turn + 1 >= max_turns)
+                    )
         except WebSocketDisconnect:
             return
         finally:
             worker.cancel()
+            await _discard(prefetch)
 
     return app
 

@@ -146,6 +146,29 @@ def test_ws_audio_follows_end_when_tts():
         assert audio['audio'] == base64.b64encode(b'FAKEAUDIO').decode('ascii')
 
 
+def test_ws_prefetch_serves_next_turn_without_tokens():
+    # 음성 모드에서 두 번째 턴부터는 prefetch 완성품이 방출된다
+    # — 실시간 스트리밍이 아니므로 token 이벤트는 첫 턴에서만 나온다
+    import json as _json
+
+    app = create_app(FakeStream(), tts_client=FakeTTS(), max_turns=3, radio_sec=0.05)
+    client = TestClient(app)
+    with client.websocket_connect('/ws') as ws:
+        ws.receive_json()  # hello
+        ws.send_text('하이')
+        types = []
+        for _ in range(40):
+            msg = ws.receive_json()
+            types.append(msg['type'])
+            if msg['type'] == 'audio':
+                ws.send_text(_json.dumps({'type': 'played'}))
+            if msg['type'] == 'done':
+                break
+        assert types.count('end') == 3  # 3턴 모두 완주
+        assert types.count('audio') == 3  # 각 턴에 자막+오디오
+        assert types.count('token') == 2  # FakeStream 토큰 2개 — 첫(실시간) 턴만
+
+
 def test_ws_waits_played_ack_before_next_radio_turn():
     # 음성 동기: played ack이 와야 다음 라디오 턴이 진행된다 (재생 페이스 조율)
     import json as _json
