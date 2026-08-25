@@ -37,6 +37,18 @@ def test_finalize_strips_prefix_then_limits():
     assert finalize_utterance(raw, '도현') == '하나. 둘.'
 
 
+def test_strip_audio_tags_variants():
+    # LLM이 내는 태그 변형은 다 지우고, 한국어 대괄호는 건드리지 않는다 (검수 🟡8 회귀)
+    from engine.graph.graph import strip_audio_tags
+
+    assert strip_audio_tags('[sighs] 하아') == '하아'
+    assert strip_audio_tags('[Sighs] 하아') == '하아'  # 대문자
+    assert strip_audio_tags('[sarcastic tone here] 그래') == '그래'  # 여러 단어
+    assert strip_audio_tags('말 사이 <break/> 쉼') == '말 사이 쉼'
+    assert strip_audio_tags('말 사이 <break time="0.4s"> 쉼') == '말 사이 쉼'  # self-closing 아님
+    assert strip_audio_tags('[도현] 얘기랑 [ㅋㅋ] 는 유지') == '[도현] 얘기랑 [ㅋㅋ] 는 유지'
+
+
 def test_question_after_limit_is_preserved():
     # 상한 직후 문장이 질문이면 살린다 — 유저 소환 질문(§1.3)이 상한(§1.4)에 잘리는 충돌 방지
     assert limit_sentences('헐. 진짜? 그래서 넌 어땠어?') == '헐. 진짜? 그래서 넌 어땠어?'

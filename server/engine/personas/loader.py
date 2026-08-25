@@ -81,7 +81,7 @@ def build_persona_prompt(
         '네 발화 내용만 출력해라 — "이름:" 같은 화자 표시를 앞에 붙이지 마라.\n'
         '이모지는 쓰지 마라 (음성으로 읽을 대사다).\n'
         '감정은 오디오 태그로 표현할 수 있다: [sighs] [tired] [sarcastic] [laughs] [excited] [cheerfully] 중 '
-        '네 페르소나에 맞는 것을 문장 앞에 0~2개만. 남발하면 부자연스럽다.'
+        '네 페르소나에 맞는 것을 문장 앞에 0~2개만. 말 사이 짧은 쉼은 <break time="0.4s" />. 남발하면 부자연스럽다.'
     )
     if intent:
         prompt += f'\n이번 발화 의도: {intent}. 이 결대로 말해라.'

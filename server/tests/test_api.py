@@ -124,7 +124,11 @@ def test_ws_done_even_if_barge_on_final_turn():
 
 
 class FakeTTS:
+    def __init__(self):
+        self.calls = []  # (text, voice, speed) — 라우팅 검증용
+
     async def synthesize(self, text: str, voice: str, speed=None) -> bytes:
+        self.calls.append((text, voice, speed))
         return b'FAKEAUDIO'
 
 
@@ -144,6 +148,78 @@ def test_ws_audio_follows_end_when_tts():
         assert audio['speaker'] == 'ai_a'
         assert audio['text'] == '안녕'  # FE가 재생 시점에 표시할 자막
         assert audio['audio'] == base64.b64encode(b'FAKEAUDIO').decode('ascii')
+
+
+def test_ws_finish_turn_audio_sent_before_done():
+    # 세션 후반 유저 개입 → 마무리 턴이 실시간 경로 → 그래도 audio가 done보다 먼저 온다
+    # (TTS drain — 마무리 멘트 유실 방지, 검수 🔴2 회귀)
+    import json as _json
+
+    app = create_app(FakeStream(), tts_client=FakeTTS(), max_turns=2, radio_sec=100)
+    client = TestClient(app)
+    with client.websocket_connect('/ws') as ws:
+        ws.receive_json()  # hello
+        ws.send_text('하이')  # 턴0 (실시간)
+        types = []
+        while True:
+            msg = ws.receive_json()
+            types.append(msg['type'])
+            if msg['type'] == 'audio':
+                ws.send_text(_json.dumps({'type': 'played', 'seq': msg['seq']}))
+                break
+        ws.send_text('한마디 더')  # prefetch 폐기 → 마무리 턴 실시간 경로
+        while types[-1] != 'done':
+            msg = ws.receive_json()
+            types.append(msg['type'])
+            if msg['type'] == 'audio':
+                ws.send_text(_json.dumps({'type': 'played', 'seq': msg['seq']}))
+        assert types.count('audio') == 2  # 마무리 멘트의 오디오도 전송됨
+        assert types.index('done') > len(types) - 1 - types[::-1].index('audio')  # audio가 done보다 앞
+
+
+def test_ws_completes_without_any_acks():
+    # ack이 전부 유실돼도 ack_sec 후 장부 리셋 — 세션이 영구 지연 없이 완주 (검수 🟡3 회귀)
+    app = create_app(FakeStream(), tts_client=FakeTTS(), max_turns=3, radio_sec=0.05, ack_sec=0.2)
+    client = TestClient(app)
+    with client.websocket_connect('/ws') as ws:
+        ws.receive_json()  # hello
+        ws.send_text('하이')
+        types = []
+        for _ in range(60):
+            types.append(ws.receive_json()['type'])
+            if types[-1] == 'done':
+                break
+        assert 'done' in types  # ack 0개여도 완주
+
+
+def test_ws_user_say_discards_prefetch_and_reaches_prompt():
+    # 유저 발화가 오면 prefetch를 버리고, 다음 턴 프롬프트에 그 발화가 실제로 들어간다
+    import json as _json
+
+    class RecStream:
+        def __init__(self):
+            self.prompts = []
+
+        async def complete_stream(self, system: str, user: str):
+            self.prompts.append(user)
+            yield '응'
+
+    rec = RecStream()
+    app = create_app(rec, tts_client=FakeTTS(), max_turns=5, radio_sec=0.5)
+    client = TestClient(app)
+    with client.websocket_connect('/ws') as ws:
+        ws.receive_json()  # hello
+        ws.send_text('하이')
+        msg = ws.receive_json()
+        while msg['type'] != 'audio':
+            msg = ws.receive_json()
+        ws.send_text(_json.dumps({'type': 'played', 'seq': msg['seq']}))
+        ws.send_text(_json.dumps({'type': 'say', 'text': '프리페치버려라42'}))
+        for _ in range(20):  # 다음 턴이 그 발화를 반영할 때까지 수신
+            msg = ws.receive_json()
+            if msg['type'] == 'end':
+                break
+        assert any('프리페치버려라42' in p for p in rec.prompts)  # 유저 발화가 프롬프트에 반영
 
 
 def test_ws_prefetch_serves_next_turn_without_tokens():

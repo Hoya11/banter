@@ -5,14 +5,17 @@
 - 세션 캡(§5): AI 발화가 max_turns에 도달하면 마무리 멘트 후 종료.
 - 음성 동기(voice mode): 소리가 주인공 — 발화 텍스트는 FE가 오디오 재생 시점에
   표시하고(자막), FE의 played ack을 받아야 다음 라디오 턴을 진행한다.
-  서버가 재생보다 앞서 달려 "채팅이 먼저 쌓이고 소리가 뒤늦게 읽는" 어긋남을 막는다.
 - prefetch(§3.2): 현재 발화가 재생되는 동안 다음 AI 턴(화자선정→대사→합성)을
   백그라운드로 완성해 둔다 — AI끼리의 티키타카는 체감 지연이 0에 수렴.
   유저가 개입하면 폐기하고 실시간 경로로 반응한다.
 
+재생 페이스는 seq 장부로 맞춘다: audio 이벤트마다 단조 증가 seq를 붙이고
+FE는 {played, seq}로 응답한다. 서버는 acked=max(acked, seq)만 기억하므로
+ack 중복은 무해하고, 유실도 뒤 ack이 덮는다(개수 카운터의 적자 문제 제거).
+
 서버→FE: {hello,voice} {start,speaker} {token,text}* {end,speaker,text}
-        {audio,speaker,text,audio|null} {interrupted,...} {error,...} {done}
-FE→서버: {"type":"say","text":...} | {"type":"played"} (일반 텍스트는 say로 폴백)
+        {audio,seq,speaker,text,audio|null} {interrupted,...} {error,...} {done}
+FE→서버: {"type":"say","text":...} | {"type":"played","seq":N} (일반 텍스트는 say로 폴백)
 """
 
 import asyncio
@@ -36,21 +39,32 @@ from engine.personas.loader import get_persona
 WEB_DIR = Path(__file__).resolve().parents[2] / 'web'
 RADIO_SEC = 5.0  # 유저 침묵이 이 시간을 넘으면 AI 턴을 자동 진행(라디오 모드)
 MAX_TURNS = 12  # AI 발화가 이 수에 도달하면 마무리 후 종료(세션 캡)
-ACK_SEC = 30.0  # played ack 최대 대기 — FE가 죽어도 이 이상 세션을 멈추지 않는다
+ACK_SEC = 30.0  # played ack 최대 대기 — 초과 시 장부를 리셋해 세션이 영구 지연되지 않게
+DRAIN_SEC = 15.0  # 종료 전 남은 TTS 전송을 기다리는 상한 (마무리 멘트 유실 방지)
 FINISH_INTENT = '이제 대화를 자연스럽게 마무리하는 인사를 건네라'
 
 
-def _parse_incoming(raw: str) -> tuple[str, str | None]:
-    """FE 메시지를 (kind, text)로 푼다. JSON이 아니면 구버전 호환으로 say 취급."""
+def _parse_incoming(raw: str) -> tuple[str, object]:
+    """FE 메시지를 (kind, value)로 푼다.
+
+    - {"type":"played","seq":N} → ('played', N)
+    - {"type":"say","text":...} → ('say', text) — 공백뿐이면 noop
+    - 그 외 JSON(미지 type·null 등) → ('noop', None): 유저 발화로 오인해
+      이력을 오염시키지 않는다. JSON이 아닌 일반 텍스트만 say로 폴백.
+    """
     try:
         data = json.loads(raw)
-        if isinstance(data, dict) and data.get('type') == 'played':
-            return 'played', None
-        if isinstance(data, dict) and data.get('type') == 'say':
-            return 'say', str(data.get('text') or '')
     except json.JSONDecodeError:
-        pass
-    return 'say', raw
+        text = raw.strip()
+        return ('say', text) if text else ('noop', None)
+    if isinstance(data, dict):
+        if data.get('type') == 'played':
+            seq = data.get('seq')
+            return 'played', seq if isinstance(seq, int) else None
+        if data.get('type') == 'say':
+            text = str(data.get('text') or '').strip()
+            return ('say', text) if text else ('noop', None)
+    return 'noop', None
 
 
 def _add_user(state: dict, text: str) -> dict:
@@ -80,6 +94,7 @@ def create_app(
     tts_client=None,
     max_turns: int = MAX_TURNS,
     radio_sec: float = RADIO_SEC,
+    ack_sec: float = ACK_SEC,
 ) -> FastAPI:
     """WS 채팅 앱을 만든다. LLM/TTS client를 주입받아(테스트는 fake) 엔진을 구동한다."""
     app = FastAPI()
@@ -98,32 +113,118 @@ def create_app(
         """화자 voice(+speed)로 태그 포함 발화를 합성해 base64 mp3를 반환한다.
 
         실패하면 None — TTS 문제로 대화 전체가 죽지 않게 격리한다.
+        voice_id 미설정은 설정 오류이므로 폴백하지 않고 드러낸다(무음 은폐 방지).
         """
+        persona = get_persona(speaker)
+        if not persona.voice_id:
+            print(f'[tts] voice_id 미설정({speaker}) — duo.yaml voice_presets 확인 필요')
+            return None
         try:
-            persona = get_persona(speaker)
-            data = await tts_client.synthesize(
-                tagged_text, persona.voice_id or 'alloy', persona.voice_speed
-            )
+            data = await tts_client.synthesize(tagged_text, persona.voice_id, persona.voice_speed)
             return base64.b64encode(data).decode('ascii')
         except Exception as exc:
             print(f'[tts] 합성 실패({type(exc).__name__}) — 소리 없이 진행')
             return None
 
+    async def _send_audio(ws: WebSocket, ctx: dict, speaker: str, clean: str, audio) -> None:
+        """audio 이벤트를 seq를 붙여 보낸다 (합성 실패 시 audio=null — FE는 자막만 표시)."""
+        ctx['sent_seq'] += 1
+        await ws.send_json(
+            {'type': 'audio', 'seq': ctx['sent_seq'], 'speaker': speaker, 'text': clean, 'audio': audio}
+        )
+
     async def _tts_worker(ws: WebSocket, queue: asyncio.Queue, ctx: dict) -> None:
         """TTS 합성 워커 — 큐를 순서대로 소비해 audio 이벤트를 발화 순서대로 보낸다.
 
         (턴마다 태스크를 띄우면 합성 완료 순서가 뒤섞여 자막·소리 순서가 깨진다.)
-        합성 실패 시에도 audio=null 이벤트를 보내 FE가 텍스트만이라도 표시하게 한다.
         """
         while True:
             speaker, clean, tagged = await queue.get()
-            audio = await _synthesize(speaker, tagged)
             try:
-                await ws.send_json(
-                    {'type': 'audio', 'speaker': speaker, 'text': clean, 'audio': audio}
-                )
+                audio = await _synthesize(speaker, tagged)
+                await _send_audio(ws, ctx, speaker, clean, audio)
             except Exception:
                 return  # 연결이 닫혔으면 워커 종료
+            finally:
+                queue.task_done()
+
+    async def _flush_stale(ws: WebSocket, ctx: dict) -> None:
+        """유저 발화 반영 시점 이전의 오디오를 FE가 버리게 한다.
+
+        합성 중(큐 대기 포함)이던 '유저 발화 이전 대사'가 뒤늦게 도착해
+        유저 말풍선 뒤에 재생되는 순서 역전을 막는다. 큐에 남은 항목은
+        sent_seq+1..sent_seq+qsize로 나갈 예정이므로 그 상한까지 폐기 지시.
+        """
+        upto = ctx['sent_seq'] + ctx['tts_queue'].qsize()
+        if upto > 0:
+            await ws.send_json({'type': 'flush', 'seq': upto})
+
+    def _unplayed(ctx: dict) -> bool:
+        """아직 재생 확인이 안 된 발화가 있는가 (합성 대기 포함)."""
+        return ctx['sent_seq'] > ctx['acked_seq'] or not ctx['tts_queue'].empty()
+
+    def _on_ack(ctx: dict, seq) -> None:
+        """played ack 반영 — seq 장부라 중복·유실에 안전하다."""
+        if isinstance(seq, int):
+            ctx['acked_seq'] = max(ctx['acked_seq'], seq)
+        else:  # 구형/비정상 ack — 전량 재생된 것으로 간주
+            ctx['acked_seq'] = ctx['sent_seq']
+
+    async def _prefetch_turn(state: dict, finish: bool = False) -> dict:
+        """다음 AI 턴을 미리 통째로 계산한다 — 이벤트 전송 없음 (§3.2 prefetch).
+
+        현재 발화가 재생되는 동안 백그라운드에서 화자선정→대사→합성까지 끝내
+        재생 종료 시 즉시 방출할 완성품을 만든다. 유저가 개입하면 폐기된다
+        (유저 침묵 전제로 만든 맥락이라 재사용 불가 — prefetch의 비용).
+        """
+        loop = asyncio.get_event_loop()
+        sel = await loop.run_in_executor(None, select_next, state, supervisor_client)
+        pre = {**state, **sel}
+        if finish:
+            pre = {**pre, 'current_intent': FINISH_INTENT}
+        system, user, speaker = prepare_utterance(pre)
+        name = get_persona(speaker).name
+        parts: list[str] = []
+        if utterance_client is None:
+            parts.append(f'({speaker} 발화 스텁)')
+        else:
+            async for token in utterance_client.complete_stream(system, user):
+                parts.append(token)
+        tagged = finalize_tagged(''.join(parts), name)
+        clean = strip_audio_tags(tagged)
+        audio = await _synthesize(speaker, tagged) if (voice_mode and clean) else None
+        return {'sel': sel, 'speaker': speaker, 'clean': clean, 'audio': audio}
+
+    async def _commit_prefetched(state: dict, ws: WebSocket, ctx: dict, pre: dict) -> dict:
+        """미리 만든 턴을 확정 방출한다 — start/end/audio를 한 번에.
+
+        트레이드오프: 이 턴은 스트리밍이 없어 서버측 barge-in이 불가하다.
+        유저 개입은 FE의 재생 중단 + 다음 턴 반영으로 처리되며, 이력에는
+        완주로 남는다(§2.1 충실도는 실시간 경로만) — docs/experiments/latency.md 참고.
+        """
+        state = {**state, **pre['sel']}
+        speaker, clean = pre['speaker'], pre['clean']
+        if not clean:  # 빈 발화는 방출·기록하지 않는다
+            await ws.send_json({'type': 'error', 'speaker': speaker})
+            return state
+        await ws.send_json({'type': 'start', 'speaker': speaker})
+        await ws.send_json({'type': 'end', 'speaker': speaker, 'text': clean})
+        if voice_mode:
+            await _send_audio(ws, ctx, speaker, clean, pre['audio'])
+        return _apply_utterance(state, speaker, clean)
+
+    async def _discard(task) -> None:
+        """prefetch를 폐기한다 (유저 개입 등으로 전제가 무너졌을 때)."""
+        if task is None:
+            return
+        if task.done():
+            task.exception()  # 'exception never retrieved' 경고 방지
+            return
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
 
     async def _stream_turn(state: dict, ws: WebSocket, ctx: dict, finish: bool = False):
         """한 AI 발화를 스트리밍하되, 도중 유저 개입이 오면 취소(barge-in)한다.
@@ -159,22 +260,27 @@ def create_app(
 
         stream_task = asyncio.create_task(_run_stream())
         barge = None
-        while True:
-            recv_task = asyncio.create_task(ws.receive_text())
-            done, _ = await asyncio.wait(
-                {stream_task, recv_task}, return_when=asyncio.FIRST_COMPLETED
-            )
-            if recv_task in done:
-                kind, text = _parse_incoming(recv_task.result())
-                if kind == 'played':  # 재생 완료 ack은 barge가 아니다 — 계속 듣는다
-                    ctx['inflight'] = max(0, ctx['inflight'] - 1)
+        try:
+            while True:
+                recv_task = asyncio.create_task(ws.receive_text())
+                done, _ = await asyncio.wait(
+                    {stream_task, recv_task}, return_when=asyncio.FIRST_COMPLETED
+                )
+                if recv_task in done:
+                    kind, value = _parse_incoming(recv_task.result())
+                    if kind == 'say':
+                        barge = value
+                        break
+                    if kind == 'played':  # ack·noop은 barge가 아니다 — 계속 듣는다
+                        _on_ack(ctx, value)
                     if stream_task.done():
                         break
                     continue
-                barge = text
+                await _cancel(recv_task)
                 break
-            await _cancel(recv_task)
-            break
+        except WebSocketDisconnect:
+            await _cancel(stream_task)  # 방치하면 'exception never retrieved'가 남는다
+            raise
 
         # 스트림이 아직이면(유저 발화가 먼저 도착) → barge-in.
         if barge is not None and not stream_task.done():
@@ -194,84 +300,42 @@ def create_app(
         # 최종본 확정 — tagged(오디오 태그 보존)는 TTS용, clean은 화면·이력용
         tagged = finalize_tagged(''.join(parts), name)
         clean = strip_audio_tags(tagged)
+        if not clean:  # 빈 발화는 확정하지 않는다 ('도현: ' 이력 오염 방지)
+            await ws.send_json({'type': 'error', 'speaker': speaker})
+            return state, barge
         await ws.send_json({'type': 'end', 'speaker': speaker, 'text': clean})
-        if voice_mode and clean:
-            ctx['inflight'] += 1  # 이 발화의 played ack이 돌아올 때까지 페이스를 잡는다
+        if voice_mode:
             await ctx['tts_queue'].put((speaker, clean, tagged))
         return _apply_utterance(state, speaker, clean), barge
-
-    async def _prefetch_turn(state: dict, finish: bool = False) -> dict:
-        """다음 AI 턴을 미리 통째로 계산한다 — 이벤트 전송 없음 (§3.2 prefetch).
-
-        현재 발화가 재생되는 동안 백그라운드에서 화자선정→대사→합성까지 끝내
-        재생 종료 시 즉시 방출할 완성품을 만든다. 유저가 개입하면 폐기된다
-        (유저 침묵 전제로 만든 맥락이라 재사용 불가 — prefetch의 비용).
-        """
-        loop = asyncio.get_event_loop()
-        sel = await loop.run_in_executor(None, select_next, state, supervisor_client)
-        pre = {**state, **sel}
-        if finish:
-            pre = {**pre, 'current_intent': FINISH_INTENT}
-        system, user, speaker = prepare_utterance(pre)
-        name = get_persona(speaker).name
-        parts: list[str] = []
-        if utterance_client is None:
-            parts.append(f'({speaker} 발화 스텁)')
-        else:
-            async for token in utterance_client.complete_stream(system, user):
-                parts.append(token)
-        tagged = finalize_tagged(''.join(parts), name)
-        clean = strip_audio_tags(tagged)
-        audio = await _synthesize(speaker, tagged) if (voice_mode and clean) else None
-        return {'sel': sel, 'speaker': speaker, 'clean': clean, 'audio': audio}
-
-    async def _commit_prefetched(state: dict, ws: WebSocket, ctx: dict, pre: dict) -> dict:
-        """미리 만든 턴을 확정 방출한다 — start/end/audio를 한 번에."""
-        state = {**state, **pre['sel']}
-        speaker, clean = pre['speaker'], pre['clean']
-        await ws.send_json({'type': 'start', 'speaker': speaker})
-        await ws.send_json({'type': 'end', 'speaker': speaker, 'text': clean})
-        if voice_mode and clean:
-            ctx['inflight'] += 1
-            await ws.send_json(
-                {'type': 'audio', 'speaker': speaker, 'text': clean, 'audio': pre['audio']}
-            )
-        return _apply_utterance(state, speaker, clean)
-
-    async def _discard(task) -> None:
-        """prefetch를 폐기한다 (유저 개입 등으로 전제가 무너졌을 때)."""
-        if task is None or task.done():
-            return
-        task.cancel()
-        try:
-            await task
-        except (asyncio.CancelledError, Exception):
-            pass
 
     async def _wait_user(
         ws: WebSocket, ctx: dict, timeout: float, until_acked: bool = False
     ) -> str | None:
-        """유저 say를 timeout까지 기다린다. played ack은 소비하며 계속 기다린다.
+        """유저 say를 timeout까지 기다린다. played ack·noop은 소비하며 계속 기다린다.
 
-        until_acked=True면 미재생 오디오(inflight)가 0이 되는 순간 바로 반환한다
-        — 재생 완료 시점부터 라디오 침묵 타이머를 새로 시작하기 위함.
+        until_acked=True면 미재생 발화가 없어지는 순간 바로 반환하고,
+        타임아웃 시 장부를 리셋한다 — ack 유실 하나로 세션이 영구 지연되는 것 방지.
         """
         loop = asyncio.get_event_loop()
         deadline = loop.time() + timeout
         while True:
-            if until_acked and ctx['inflight'] <= 0:
+            if until_acked and not _unplayed(ctx):
                 return None
             remain = deadline - loop.time()
             if remain <= 0:
+                if until_acked and _unplayed(ctx):
+                    print('[pace] played ack 타임아웃 — 장부 리셋')
+                    ctx['acked_seq'] = ctx['sent_seq']
                 return None
             try:
                 raw = await asyncio.wait_for(ws.receive_text(), timeout=remain)
             except asyncio.TimeoutError:
-                return None
-            kind, text = _parse_incoming(raw)
+                continue  # deadline 검사로 되돌아감
+            kind, value = _parse_incoming(raw)
             if kind == 'say':
-                return text
-            ctx['inflight'] = max(0, ctx['inflight'] - 1)
+                return value
+            if kind == 'played':
+                _on_ack(ctx, value)
 
     @app.websocket('/ws')
     async def chat(ws: WebSocket) -> None:
@@ -280,7 +344,7 @@ def create_app(
         state = initial_state()
         turn = 0
         pending_user = None  # barge-in으로 받은 유저 발화(다음 턴에 반영)
-        ctx = {'inflight': 0, 'tts_queue': asyncio.Queue()}
+        ctx = {'sent_seq': 0, 'acked_seq': 0, 'tts_queue': asyncio.Queue()}
         worker = asyncio.create_task(_tts_worker(ws, ctx['tts_queue'], ctx))
         prefetch = None  # 재생 중 미리 만들어두는 다음 AI 턴 (§3.2)
         try:
@@ -290,18 +354,20 @@ def create_app(
                     state = _add_user(state, pending_user)
                     pending_user = None
                     user_spoke = True
+                    await _flush_stale(ws, ctx)
                 else:
                     # 음성 동기: 앞선 발화의 재생이 끝나기(played ack)를 기다린 뒤에야
                     # 라디오 침묵 타이머를 돌린다 — 서버가 재생보다 앞서 달리지 않게.
                     # (그동안 prefetch가 백그라운드에서 다음 턴을 완성해 둔다)
                     said = None
-                    if voice_mode and ctx['inflight'] > 0:
-                        said = await _wait_user(ws, ctx, ACK_SEC, until_acked=True)
+                    if voice_mode and _unplayed(ctx):
+                        said = await _wait_user(ws, ctx, ack_sec, until_acked=True)
                     if said is None:
                         said = await _wait_user(ws, ctx, radio_sec)
                     if said is not None:
                         state = _add_user(state, said)
                         user_spoke = True
+                        await _flush_stale(ws, ctx)
 
                 finish = turn + 1 >= max_turns
                 if user_spoke:
@@ -323,6 +389,11 @@ def create_app(
 
                 # 세션 캡이 barge보다 우선 — 마무리 턴에 끼어들어도 세션은 종료된다
                 if finish:
+                    # 마무리 멘트의 TTS가 아직 큐에 있으면 전송을 기다린다 (유실 방지)
+                    try:
+                        await asyncio.wait_for(ctx['tts_queue'].join(), timeout=DRAIN_SEC)
+                    except asyncio.TimeoutError:
+                        pass
                     await ws.send_json({'type': 'done'})
                     break
                 if barge is not None:

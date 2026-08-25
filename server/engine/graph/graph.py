@@ -113,7 +113,9 @@ def limit_sentences(text: str, max_sentences: int = MAX_SENTENCES) -> str:
     return text[: cut + 1].strip()
 
 
-_AUDIO_TAG_RE = re.compile(r'\[[a-z]+(?: [a-z]+)?\]\s*|<break\s+[^>]*/>\s*')
+# 영문 태그만 매치 — [도현]/[ㅋㅋ] 같은 한국어 대괄호는 건드리지 않는다.
+# LLM 변형([Sighs], 여러 단어, <break/> 속성 유무)까지 흡수하도록 느슨하게.
+_AUDIO_TAG_RE = re.compile(r'\[[A-Za-z][A-Za-z ]{0,30}\]\s*|<break\b[^>]*>\s*')
 
 
 def strip_audio_tags(text: str) -> str:

@@ -20,10 +20,12 @@ def test_loads_duo():
 
 
 def test_active_preset_injects_voices():
-    # 활성 프리셋(chris-jessica)의 voice_id가 페르소나에 주입된다
+    # 활성 프리셋(chris-jessica)의 voice_id·speed가 페르소나에 주입된다
     personas = load_personas()
     assert personas['ai_a'].voice_id == 'iP95p4xoKVk53GoZ742B'  # Chris
+    assert personas['ai_a'].voice_speed == 1.1  # 프리셋 dict 형태의 speed
     assert personas['ai_b'].voice_id == 'cgSgspJ2msm6clMCkdW9'  # Jessica
+    assert personas['ai_b'].voice_speed is None  # 문자열 형태는 speed 없음
 
 
 def test_resolve_voices_unknown_preset_raises():
