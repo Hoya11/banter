@@ -37,6 +37,20 @@ def test_finalize_strips_prefix_then_limits():
     assert finalize_utterance(raw, '도현') == '하나. 둘.'
 
 
+def test_pop_sentences_incremental():
+    # 스트리밍 문장 분리 — 경계 확정은 다음 글자가 와야 (연속부호·소수점 유예)
+    from engine.graph.graph import pop_sentences
+
+    done, rest = pop_sentences('하나. 둘째가 진행')
+    assert done == ['하나.'] and rest == ' 둘째가 진행'
+    done, rest = pop_sentences('진짜?')  # 버퍼 끝 — '!'가 이어질 수 있어 유예
+    assert done == [] and rest == '진짜?'
+    done, rest = pop_sentences('진짜?! 그러')  # 다음 글자 확인 후 확정
+    assert done == ['진짜?!'] and rest == ' 그러'
+    done, rest = pop_sentences('3.5시간 잤어. 그리고')  # 소수점은 경계 아님
+    assert done == ['3.5시간 잤어.'] and rest == ' 그리고'
+
+
 def test_strip_audio_tags_variants():
     # LLM이 내는 태그 변형은 다 지우고, 한국어 대괄호는 건드리지 않는다 (검수 🟡8 회귀)
     from engine.graph.graph import strip_audio_tags

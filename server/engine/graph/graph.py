@@ -126,6 +126,32 @@ def strip_audio_tags(text: str) -> str:
     return _AUDIO_TAG_RE.sub('', text).strip()
 
 
+def pop_sentences(buffer: str) -> tuple[list[str], str]:
+    """스트리밍 버퍼에서 완성된 문장들을 꺼낸다 (경계 규칙은 limit_sentences와 동일).
+
+    버퍼 끝의 종결부호는 아직 경계로 확정하지 않는다 — 다음 토큰이 연속 부호('?!')나
+    소수점 뒷자리일 수 있어서, 뒷글자가 와야 확정된다. 스트림 종료 시 잔여는 호출부가 flush.
+    """
+    ends = []
+    for i, ch in enumerate(buffer):
+        if ch in _SENTENCE_END:
+            if i + 1 >= len(buffer):
+                continue  # 버퍼 끝 — 다음 토큰으로 확정 유예
+            if ch == '.' and buffer[i - 1 : i].isdigit() and buffer[i + 1 : i + 2].isdigit():
+                continue
+            if buffer[i + 1] in _SENTENCE_END:
+                continue
+            ends.append(i)
+    sentences = []
+    start = 0
+    for e in ends:
+        s = buffer[start : e + 1].strip()
+        if s:
+            sentences.append(s)
+        start = e + 1
+    return sentences, buffer[start:]
+
+
 def finalize_utterance(raw: str, name: str) -> str:
     """LLM 발화 원문에 공통 후처리(프리픽스 제거 → 문장 상한 → 태그 제거)를 적용한다.
 

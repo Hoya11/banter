@@ -6,6 +6,7 @@ fake 스트리밍 client로 '유저 발화 → start/token*/end 스트림' 흐�
 
 import asyncio
 import base64
+import json
 
 from fastapi.testclient import TestClient
 
@@ -133,21 +134,47 @@ class FakeTTS:
 
 
 def test_ws_audio_follows_end_when_tts():
-    # tts_client가 있으면 end 뒤 별도 audio 이벤트(자막용 text 포함)가 온다 (비차단 TTS)
+    # tts_client가 있으면 별도 audio 이벤트(자막용 text 포함)가 온다 (비차단 TTS —
+    # 문장 단위 합성이 스트림과 동시에 돌아 end와의 순서는 고정되지 않는다)
     app = create_app(FakeStream(), tts_client=FakeTTS())
     client = TestClient(app)
     with client.websocket_connect('/ws') as ws:
         assert ws.receive_json() == {'type': 'hello', 'voice': True, 'stt': False}  # 음성 모드 안내
         ws.send_text('하이')
-        assert ws.receive_json()['type'] == 'start'
-        ws.receive_json()  # token 안
-        ws.receive_json()  # token 녕
-        assert ws.receive_json()['type'] == 'end'
-        audio = ws.receive_json()
-        assert audio['type'] == 'audio'
+        audio = None
+        for _ in range(10):
+            msg = ws.receive_json()
+            if msg['type'] == 'audio':
+                audio = msg
+                break
+        assert audio is not None
         assert audio['speaker'] == 'ai_a'
         assert audio['text'] == '안녕'  # FE가 재생 시점에 표시할 자막
         assert audio['audio'] == base64.b64encode(b'FAKEAUDIO').decode('ascii')
+
+
+def test_ws_sentence_streaming_emits_audio_per_sentence():
+    # 문장 단위 flush(§3.1): 두 문장 발화 → audio 이벤트 2개(둘째는 cont=True)
+    class TwoSentenceStream:
+        async def complete_stream(self, system: str, user: str):
+            for token in ['첫 문', '장이다. ', '둘째 문', '장이다.', ' 셋째는 상한.']:
+                yield token
+
+    app = create_app(TwoSentenceStream(), tts_client=FakeTTS(), max_turns=1, radio_sec=100)
+    client = TestClient(app)
+    with client.websocket_connect('/ws') as ws:
+        ws.receive_json()  # hello
+        ws.send_text('하이')
+        audios = []
+        for _ in range(30):
+            msg = ws.receive_json()
+            if msg['type'] == 'audio':
+                audios.append(msg)
+                ws.send_text(json.dumps({'type': 'played', 'seq': msg['seq']}))
+            if msg['type'] == 'done':
+                break
+        assert [a['text'] for a in audios] == ['첫 문장이다.', '둘째 문장이다.']  # 상한 2 적용
+        assert [a['cont'] for a in audios] == [False, True]  # 같은 발화의 이어짐 표시
 
 
 def test_ws_finish_turn_audio_sent_before_done():
@@ -215,9 +242,12 @@ def test_ws_user_say_discards_prefetch_and_reaches_prompt():
             msg = ws.receive_json()
         ws.send_text(_json.dumps({'type': 'played', 'seq': msg['seq']}))
         ws.send_text(_json.dumps({'type': 'say', 'text': '프리페치버려라42'}))
-        for _ in range(20):  # 다음 턴이 그 발화를 반영할 때까지 수신
+        started = False  # say 이후 새 턴(start)을 보고 그 턴의 end까지 기다린다
+        for _ in range(30):
             msg = ws.receive_json()
-            if msg['type'] == 'end':
+            if msg['type'] == 'start':
+                started = True
+            if msg['type'] == 'end' and started:
                 break
         assert any('프리페치버려라42' in p for p in rec.prompts)  # 유저 발화가 프롬프트에 반영
 
@@ -287,9 +317,9 @@ def test_ws_waits_played_ack_before_next_radio_turn():
     with client.websocket_connect('/ws') as ws:
         ws.receive_json()  # hello
         ws.send_text('하이')
-        for _ in range(4):
-            ws.receive_json()  # start, token*2, end
-        assert ws.receive_json()['type'] == 'audio'
+        msg = ws.receive_json()
+        while msg['type'] != 'audio':  # 합성이 스트림과 동시라 end와 순서 비고정
+            msg = ws.receive_json()
         ws.send_text(_json.dumps({'type': 'played'}))  # 재생 완료 ack → 다음 턴 허용
         types = []
         for _ in range(20):

@@ -27,8 +27,10 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 
 from engine.graph.graph import (
+    MAX_SENTENCES,
     _strip_speaker_prefix,
     finalize_tagged,
+    pop_sentences,
     prepare_utterance,
     strip_audio_tags,
 )
@@ -130,11 +132,23 @@ def create_app(
             print(f'[tts] 합성 실패({type(exc).__name__}) — 소리 없이 진행')
             return None
 
-    async def _send_audio(ws: WebSocket, ctx: dict, speaker: str, clean: str, audio) -> None:
-        """audio 이벤트를 seq를 붙여 보낸다 (합성 실패 시 audio=null — FE는 자막만 표시)."""
+    async def _send_audio(
+        ws: WebSocket, ctx: dict, speaker: str, clean: str, audio, cont: bool = False
+    ) -> None:
+        """audio 이벤트를 seq를 붙여 보낸다 (합성 실패 시 audio=null — FE는 자막만 표시).
+
+        cont=True는 같은 발화의 이어지는 문장 — FE가 새 말풍선 대신 이어붙인다.
+        """
         ctx['sent_seq'] += 1
         await ws.send_json(
-            {'type': 'audio', 'seq': ctx['sent_seq'], 'speaker': speaker, 'text': clean, 'audio': audio}
+            {
+                'type': 'audio',
+                'seq': ctx['sent_seq'],
+                'speaker': speaker,
+                'text': clean,
+                'audio': audio,
+                'cont': cont,
+            }
         )
 
     async def _tts_worker(ws: WebSocket, queue: asyncio.Queue, ctx: dict) -> None:
@@ -143,10 +157,10 @@ def create_app(
         (턴마다 태스크를 띄우면 합성 완료 순서가 뒤섞여 자막·소리 순서가 깨진다.)
         """
         while True:
-            speaker, clean, tagged = await queue.get()
+            speaker, clean, tagged, cont = await queue.get()
             try:
                 audio = await _synthesize(speaker, tagged)
-                await _send_audio(ws, ctx, speaker, clean, audio)
+                await _send_audio(ws, ctx, speaker, clean, audio, cont)
             except Exception:
                 return  # 연결이 닫혔으면 워커 종료
             finally:
@@ -266,16 +280,59 @@ def create_app(
         name = get_persona(speaker).name
 
         await ws.send_json({'type': 'start', 'speaker': speaker})
-        parts: list[str] = []
+        parts: list[str] = []  # barge 시 부분 발화 복원용 원문 토큰
+        emitted: list[str] = []  # 확정된 문장(clean) — 자막·이력용
+        flags = {'first': True, 'extended': False}
+
+        def _may_emit(sentence: str) -> bool:
+            # 문장 상한(§1.4)의 스트리밍판 — 상한 직후 질문 1개는 허용(유저 소환 보호)
+            if len(emitted) < MAX_SENTENCES:
+                return True
+            if (
+                len(emitted) == MAX_SENTENCES
+                and not flags['extended']
+                and sentence.rstrip().endswith('?')
+            ):
+                flags['extended'] = True
+                return True
+            return False
+
+        async def _emit(sentence_raw: str) -> bool:
+            """완성 문장 하나를 확정한다 — 자막·이력엔 clean, TTS엔 태그 보존본."""
+            raw = sentence_raw
+            if flags['first']:
+                raw = _strip_speaker_prefix(raw, name)
+                flags['first'] = False
+            clean = strip_audio_tags(raw).strip()
+            if not clean:
+                return True  # 태그뿐인 조각 — 버리고 계속
+            if not _may_emit(clean):
+                return False
+            emitted.append(clean)
+            if voice_mode:
+                await ctx['tts_queue'].put((speaker, clean, raw, len(emitted) > 1))
+            return True
 
         async def _run_stream():
+            # 문장 단위 flush(§3.1): 첫 문장이 완성되는 즉시 합성 큐로 보낸다 —
+            # 발화 전체 생성·합성을 기다리지 않아 유저 응답의 첫 소리가 단축된다.
             if utterance_client is None:
-                parts.append(f'({speaker} 발화 스텁)')
-                await ws.send_json({'type': 'token', 'text': parts[-1]})
-            else:
-                async for token in utterance_client.complete_stream(system, user):
-                    parts.append(token)
-                    await ws.send_json({'type': 'token', 'text': token})
+                text = f'({speaker} 발화 스텁)'
+                parts.append(text)
+                await ws.send_json({'type': 'token', 'text': text})
+                await _emit(text)
+                return
+            buffer = ''
+            async for token in utterance_client.complete_stream(system, user):
+                parts.append(token)
+                await ws.send_json({'type': 'token', 'text': token})
+                buffer += token
+                done_sentences, buffer = pop_sentences(buffer)
+                for s in done_sentences:
+                    if not await _emit(s):
+                        return  # 상한 도달 — 남은 토큰 생성도 중단(비용 절약)
+            if buffer.strip():
+                await _emit(buffer.strip())  # 종결부호 없는 잔여(반말체) flush
 
         async def _cancel(task) -> None:
             task.cancel()
@@ -323,15 +380,12 @@ def create_app(
             await ws.send_json({'type': 'error', 'speaker': speaker})
             return state, barge
 
-        # 최종본 확정 — tagged(오디오 태그 보존)는 TTS용, clean은 화면·이력용
-        tagged = finalize_tagged(''.join(parts), name)
-        clean = strip_audio_tags(tagged)
+        # 문장들은 스트리밍 중 이미 확정·합성 큐 전송됨 — 여기선 발화 전체를 마감만
+        clean = ' '.join(emitted)
         if not clean:  # 빈 발화는 확정하지 않는다 ('도현: ' 이력 오염 방지)
             await ws.send_json({'type': 'error', 'speaker': speaker})
             return state, barge
         await ws.send_json({'type': 'end', 'speaker': speaker, 'text': clean})
-        if voice_mode:
-            await ctx['tts_queue'].put((speaker, clean, tagged))
         return _apply_utterance(state, speaker, clean), barge
 
     async def _wait_user(
@@ -382,6 +436,7 @@ def create_app(
                     state = _add_user(state, pending_user)
                     pending_user = None
                     user_spoke = True
+                    await _flush_stale(ws, ctx)  # 끊긴 발화의 이미 큐잉된 문장 오디오 폐기
                     await _flush_stale(ws, ctx)
                 else:
                     # 음성 동기: 앞선 발화의 재생이 끝나기(played ack)를 기다린 뒤에야

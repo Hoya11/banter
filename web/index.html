@@ -51,7 +51,17 @@
         wrap.append(name, body);
         log.append(wrap);
         log.scrollTop = log.scrollHeight;
-        return { wrap, body };
+        if (speaker === 'user') lastAi = null; // 유저 발화가 끼면 AI 문장 이어붙이기 끊김
+        return { wrap, body, speaker };
+      }
+      let lastAi = null; // 문장 단위 자막을 같은 발화 말풍선에 이어붙이기 위한 참조
+      function showSentence(item) {
+        if (item.cont && lastAi && lastAi.speaker === item.speaker) {
+          lastAi.body.textContent += ' ' + item.text; // 같은 발화의 다음 문장
+          log.scrollTop = log.scrollHeight;
+        } else {
+          lastAi = add(item.speaker, item.text);
+        }
       }
 
       // 발화 오디오 순차 재생 — 단일 Audio 엘리먼트 재사용.
@@ -114,7 +124,7 @@
         const gen = generation;
         const finish = () => { if (gen !== generation) return; ack(item.seq); playNext(); };
         if (!item.audio) { // 합성 실패 → 자막만 표시하고 즉시 다음
-          add(item.speaker, item.text);
+          showSentence(item);
           finish();
           return;
         }
@@ -122,7 +132,7 @@
         player.onended = finish;
         player.onerror = finish;
         player.play().then(() => {
-          add(item.speaker, item.text); // 재생 성공 순간 자막 표시
+          showSentence(item); // 재생 성공 순간 자막 표시 (문장 단위)
         }).catch((err) => {
           if (err && err.name === 'NotAllowedError' && !unlocked) {
             // 아직 제스처 전 — 항목을 되돌리고 안내. ack하지 않는다(서버가 기다려줌)
@@ -131,7 +141,7 @@
             showSoundHint();
             return;
           }
-          add(item.speaker, item.text); // 기타 재생 실패 → 자막만
+          showSentence(item); // 기타 재생 실패 → 자막만
           finish();
         });
       }
@@ -160,7 +170,12 @@
           voiceMode = d.voice; // 음성 모드면 토큰 라이브 표시 대신 오디오 동기 표시
           if (d.stt) document.getElementById('mic').hidden = false; // 🎤 push-to-talk
         } else if (d.type === 'you') {
-          add('user', d.text); // 내 음성의 전사 결과 (서버 echo)
+          if (pendingStt) { // '듣는 중…' 자리에 전사 결과 채움
+            pendingStt.body.textContent = d.text;
+            pendingStt = null;
+          } else {
+            add('user', d.text);
+          }
         } else if (d.type === 'start') {
           current = voiceMode ? null : add(d.speaker, '');
         } else if (d.type === 'token') {
@@ -170,7 +185,7 @@
           if (current) current.body.textContent = d.text;
           current = null; // 음성 모드에선 audio 이벤트가 표시를 담당
         } else if (d.type === 'audio') {
-          enqueuePresentation({ seq: d.seq, speaker: d.speaker, text: d.text, audio: d.audio });
+          enqueuePresentation({ seq: d.seq, speaker: d.speaker, text: d.text, audio: d.audio, cont: d.cont });
         } else if (d.type === 'flush') {
           flushUpTo = Math.max(flushUpTo, d.seq); // 유저 발화 이전 대사는 이후 도착해도 폐기
           stopAudio();
@@ -204,6 +219,7 @@
       const micBtn = document.getElementById('mic');
       let recorder = null;
       let chunks = [];
+      let pendingStt = null; // 전사 대기 중인 '🎤 …' 말풍선
       async function startRec() {
         stopAudio(); // 말하려는 순간 AI 목소리를 끊는다 (barge)
         unlockAudio();
@@ -216,6 +232,10 @@
             stream.getTracks().forEach((t) => t.stop());
             const blob = new Blob(chunks, { type: recorder.mimeType });
             if (blob.size < 1500) return; // 스치듯 눌린 짧은 녹음은 무시
+            // 전사되는 동안의 무반응 공백을 없앤다 — 즉시 자리 표시
+            pendingStt = add('user', '🎤 …');
+            const placed = pendingStt;
+            setTimeout(() => { if (pendingStt === placed) { placed.wrap.remove(); pendingStt = null; } }, 10000);
             const b64 = await new Promise((res) => {
               const r = new FileReader();
               r.onload = () => res(r.result.split(',')[1]);
