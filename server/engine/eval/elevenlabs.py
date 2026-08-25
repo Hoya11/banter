@@ -24,7 +24,8 @@ class ElevenLabsClient:
         self._model_id = model_id  # 한국어는 multilingual v2 (저지연은 flash 계열)
         # 커넥션 재사용 — 요청마다 새 클라이언트를 만들면 TLS 핸드셰이크로
         # 턴당 100~300ms가 추가돼 실시간 대화 지연에 그대로 얹힌다
-        self._http = httpx.AsyncClient(timeout=httpx.Timeout(10, connect=3))
+        # v3는 합성이 느려(수 초) read를 넉넉히 — 비차단 구조라 대화를 막지는 않는다
+        self._http = httpx.AsyncClient(timeout=httpx.Timeout(20, connect=5))
 
     async def synthesize(self, text: str, voice: str) -> bytes:
         """voice=ElevenLabs voice_id. mp3 bytes를 반환한다."""

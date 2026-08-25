@@ -51,9 +51,23 @@
         return { wrap, body };
       }
 
-      // 발화 오디오를 순차 재생 (겹침 방지)
+      // 발화 오디오 순차 재생 — 단일 Audio 엘리먼트 재사용.
+      // 브라우저 autoplay 정책상 사용자 제스처로 한번 재생된 엘리먼트만
+      // 이후 프로그램 재생이 허용되므로, 첫 전송 때 무음으로 unlock한다.
+      const SILENT_WAV = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQAAAAA=';
+      const player = new Audio();
       const audioQueue = [];
       let playing = false;
+      let unlocked = false;
+      player.onended = () => playNext();
+      player.onerror = () => playNext();
+
+      function unlockAudio() {
+        if (unlocked) return;
+        unlocked = true;
+        player.src = SILENT_WAV;
+        player.play().catch(() => {});
+      }
       function enqueueAudio(b64) {
         audioQueue.push(b64);
         if (!playing) playNext();
@@ -61,12 +75,14 @@
       function playNext() {
         if (!audioQueue.length) { playing = false; return; }
         playing = true;
-        const audio = new Audio('data:audio/mpeg;base64,' + audioQueue.shift());
-        let advanced = false; // onended/onerror/catch 중복 호출로 큐가 두 칸 나가는 것 방지
-        const advance = () => { if (advanced) return; advanced = true; playNext(); };
-        audio.onended = advance;
-        audio.onerror = advance;
-        audio.play().catch(advance);
+        player.src = 'data:audio/mpeg;base64,' + audioQueue.shift();
+        player.play().catch(() => playNext());
+      }
+      // 클라이언트 barge — 유저가 입력하는 순간 재생 중인 목소리를 끊고 큐를 비운다
+      function stopAudio() {
+        audioQueue.length = 0;
+        player.pause();
+        playing = false;
       }
 
       const ws = new WebSocket('ws://' + location.host + '/ws');
@@ -82,7 +98,8 @@
         } else if (d.type === 'end') {
           if (current) current.body.textContent = d.text; // 최종본(프리픽스 제거 반영)
           current = null;
-          if (d.audio) enqueueAudio(d.audio); // 목소리 재생
+        } else if (d.type === 'audio') {
+          enqueueAudio(d.audio); // 목소리는 별도 이벤트로 뒤따라 온다(비차단 TTS)
         } else if (d.type === 'interrupted') {
           if (current) current.body.textContent = (d.text || '') + ' —(끊김)';
           current = null;
@@ -108,6 +125,8 @@
         const input = document.getElementById('msg');
         const v = input.value.trim();
         if (!v) return;
+        unlockAudio(); // 첫 제스처에서 오디오 재생 권한 확보
+        stopAudio(); // 끼어드는 순간 AI 목소리를 즉시 끊는다 (클라이언트 barge)
         add('user', v); // 내 발화는 로컬에서 바로 표시
         ws.send(v);
         input.value = '';

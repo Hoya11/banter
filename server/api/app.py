@@ -77,7 +77,20 @@ def create_app(
             print(f'[tts] 합성 실패({type(exc).__name__}) — 소리 없이 진행')
             return None
 
-    async def _stream_turn(state: dict, ws: WebSocket, finish: bool = False):
+    async def _send_audio_later(ws: WebSocket, speaker: str, text: str) -> None:
+        """TTS를 백그라운드에서 합성해 audio 이벤트로 보낸다.
+
+        합성(v3는 수 초)이 턴을 막지 않게 임계 경로에서 분리 — 텍스트 진행이 우선,
+        소리는 준비되는 대로 뒤따른다. 실패해도 대화에 영향 없음.
+        """
+        try:
+            audio = await _synthesize(speaker, text)
+            if audio:
+                await ws.send_json({'type': 'audio', 'speaker': speaker, 'audio': audio})
+        except Exception as exc:
+            print(f'[tts] audio 전송 실패({type(exc).__name__}) — 소리 없이 진행')
+
+    async def _stream_turn(state: dict, ws: WebSocket, bg: set, finish: bool = False):
         """한 AI 발화를 스트리밍하되, 도중 유저 개입이 오면 취소(barge-in)한다.
 
         반환: (새 state, barge_text) — barge_text가 있으면 유저가 끼어든 것.
@@ -138,8 +151,12 @@ def create_app(
 
         # 최종본 확정: 프리픽스 제거 + 문장 상한(§1.4) — FE는 end에서 이 최종본으로 교체
         text = finalize_utterance(''.join(parts), name)
-        audio = await _synthesize(speaker, text)
-        await ws.send_json({'type': 'end', 'speaker': speaker, 'text': text, 'audio': audio})
+        await ws.send_json({'type': 'end', 'speaker': speaker, 'text': text})
+        # TTS는 비차단 — end·다음 턴을 막지 않고 audio 이벤트로 뒤따른다
+        if tts_client is not None and text:
+            task = asyncio.create_task(_send_audio_later(ws, speaker, text))
+            bg.add(task)
+            task.add_done_callback(bg.discard)
         return _apply_utterance(state, speaker, text), barge
 
     @app.websocket('/ws')
@@ -148,6 +165,7 @@ def create_app(
         state = initial_state()
         turn = 0
         pending_user = None  # barge-in으로 받은 유저 발화(다음 턴에 반영)
+        bg: set = set()  # 진행 중인 백그라운드 TTS 태스크 (GC 방지)
         try:
             while True:
                 if pending_user is not None:
@@ -161,7 +179,7 @@ def create_app(
                         pass
 
                 finish = turn + 1 >= max_turns
-                state, barge = await _stream_turn(state, ws, finish=finish)
+                state, barge = await _stream_turn(state, ws, bg, finish=finish)
                 turn += 1
 
                 # 세션 캡이 barge보다 우선 — 마무리 턴에 끼어들어도 세션은 종료된다

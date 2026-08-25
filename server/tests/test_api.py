@@ -27,10 +27,7 @@ def test_ws_streams_tokens_then_end():
         assert ws.receive_json() == {'type': 'token', 'text': '안'}
         assert ws.receive_json() == {'type': 'token', 'text': '녕'}
         end = ws.receive_json()
-        assert end['type'] == 'end'
-        assert end['speaker'] == 'ai_a'
-        assert end['text'] == '안녕'
-        assert end['audio'] is None  # tts_client 없으면 오디오 없음
+        assert end == {'type': 'end', 'speaker': 'ai_a', 'text': '안녕'}  # audio는 별도 이벤트
 
 
 def test_ws_stub_when_no_client():
@@ -126,8 +123,8 @@ class FakeTTS:
         return b'FAKEAUDIO'
 
 
-def test_ws_end_includes_audio_when_tts():
-    # tts_client가 있으면 발화 완성 시 base64 오디오가 실려 온다
+def test_ws_audio_follows_end_when_tts():
+    # tts_client가 있으면 end 직후 별도 audio 이벤트가 온다 (비차단 TTS)
     app = create_app(FakeStream(), tts_client=FakeTTS())
     client = TestClient(app)
     with client.websocket_connect('/ws') as ws:
@@ -135,6 +132,8 @@ def test_ws_end_includes_audio_when_tts():
         assert ws.receive_json()['type'] == 'start'
         ws.receive_json()  # token 안
         ws.receive_json()  # token 녕
-        end = ws.receive_json()
-        assert end['type'] == 'end'
-        assert end['audio'] == base64.b64encode(b'FAKEAUDIO').decode('ascii')
+        assert ws.receive_json()['type'] == 'end'
+        audio = ws.receive_json()
+        assert audio['type'] == 'audio'
+        assert audio['speaker'] == 'ai_a'
+        assert audio['audio'] == base64.b64encode(b'FAKEAUDIO').decode('ascii')
