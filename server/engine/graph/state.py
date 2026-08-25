@@ -32,7 +32,8 @@ class ConvState(TypedDict):
 
     # conversation
     messages: Annotated[list[Message], operator.add]  # 노드 반환분을 누적
-    topic_stack: list[str]  # 현재 화제 + 보류 화제 (유저 개입 시 회수용)
+    topic_stack: list[str]  # 현재 화제(맨 위) + 보류 화제 — supervisor가 판단, 코드가 갱신
+    topic_turns: int  # 현재 화제가 이어진 턴 수 — 신선도 가드(§1.4 화제 집착 방지)
     # turn
     current_speaker: Speaker | None
     consecutive_ai_turns: int  # AI 연속 발화 카운터 (유저 소외 방지)
@@ -51,6 +52,7 @@ def initial_state() -> ConvState:
     return {
         'messages': [],
         'topic_stack': [],
+        'topic_turns': 0,
         'current_speaker': None,
         'consecutive_ai_turns': 0,
         'last_user_turn_ts': None,

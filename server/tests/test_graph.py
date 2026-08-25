@@ -5,7 +5,12 @@ LLM 결정을 이긴다. AI 둘이 번갈아 말하는 규칙이 §1.4 루프 �
 """
 
 from engine.graph.graph import build_graph
-from engine.graph.supervisor import select_next
+from engine.graph.supervisor import (
+    TOPIC_STALE_TURNS,
+    _update_topics,
+    build_supervisor_prompt,
+    select_next,
+)
 
 
 def _state(current, consec=0):
@@ -104,6 +109,44 @@ def test_fallback_after_user_avoids_last_ai_speaker():
         {'speaker': 'user', 'text': 'y', 'ts': 0.0, 'interrupted': False},
     ]
     assert select_next(state)['current_speaker'] == 'ai_b'
+
+
+def test_update_topics_rules():
+    # 새 화제 push (이전 화제는 보류) / 같은 화제는 카운터만 / 보류 복귀는 맨 위로 / 상한 유지
+    stack, turns = _update_topics([], 0, '퇴근 후 저녁')
+    assert (stack, turns) == (['퇴근 후 저녁'], 1)
+    stack, turns = _update_topics(stack, turns, '퇴근 후 저녁')
+    assert (stack, turns) == (['퇴근 후 저녁'], 2)
+    stack, turns = _update_topics(stack, turns, '주말 계획')
+    assert (stack, turns) == (['퇴근 후 저녁', '주말 계획'], 1)
+    stack, turns = _update_topics(stack, turns, '퇴근 후 저녁')  # 보류 화제 복귀
+    assert (stack, turns) == (['주말 계획', '퇴근 후 저녁'], 1)
+    assert _update_topics(stack, 3, None) == (stack, 3)  # 판단 없으면 유지
+    many = [f't{i}' for i in range(9)]
+    trimmed, _ = _update_topics(many, 1, '새화제')
+    assert len(trimmed) <= 5 and trimmed[-1] == '새화제'  # 상한
+
+
+def test_supervisor_updates_topic_state():
+    class Sup:
+        def complete(self, system: str, user: str) -> str:
+            return '{"next_speaker": "ai_b", "intent": "반박", "topic": "야근 문화"}'
+
+    out = select_next(_state('ai_a', 1), Sup())
+    assert out['topic_stack'] == ['야근 문화']
+    assert out['topic_turns'] == 1
+
+
+def test_stale_topic_injects_switch_directive():
+    # 신선도 가드는 코드(카운터)가 판정한다 — 임계 이상일 때만 전환 지시가 조립된다
+    state = _state('ai_a', 1)
+    state['topic_stack'] = ['퇴근 후 저녁']
+    state['topic_turns'] = TOPIC_STALE_TURNS
+    _, user_stale = build_supervisor_prompt(state)
+    assert '화제 전환' in user_stale
+    state['topic_turns'] = 1
+    _, user_fresh = build_supervisor_prompt(state)
+    assert '화제 전환' not in user_fresh
 
 
 def test_graph_one_pass():

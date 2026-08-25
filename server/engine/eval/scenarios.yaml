@@ -29,6 +29,17 @@ scenarios:
       - type: ai
       - type: ai
       - type: ai
+  - id: radio_long
+    desc: 유저 장기 침묵 — AI끼리 8턴 (소재 고갈·화제 관리 측정)
+    steps:
+      - type: ai
+      - type: ai
+      - type: ai
+      - type: ai
+      - type: ai
+      - type: ai
+      - type: ai
+      - type: ai
   - id: barge_in
     desc: 유저가 AI 발화 중 끼어듦 — 발화권 양보·수습(§2.1)
     steps:
