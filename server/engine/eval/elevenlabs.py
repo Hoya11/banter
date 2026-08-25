@@ -27,12 +27,19 @@ class ElevenLabsClient:
         # v3는 합성이 느려(수 초) read를 넉넉히 — 비차단 구조라 대화를 막지는 않는다
         self._http = httpx.AsyncClient(timeout=httpx.Timeout(20, connect=5))
 
-    async def synthesize(self, text: str, voice: str) -> bytes:
-        """voice=ElevenLabs voice_id. mp3 bytes를 반환한다."""
+    async def synthesize(self, text: str, voice: str, speed: float | None = None) -> bytes:
+        """voice=ElevenLabs voice_id. mp3 bytes를 반환한다.
+
+        speed는 지원 모델에서만 반영(미지원 모델이 400을 내면 호출부의
+        실패 격리로 무음 폴백 — 대화는 계속된다).
+        """
+        body: dict = {'text': text, 'model_id': self._model_id}
+        if speed is not None:
+            body['voice_settings'] = {'speed': speed}
         resp = await self._http.post(
             f'{ELEVEN_URL}/{voice}',
             headers={'xi-api-key': self._key, 'accept': 'audio/mpeg'},
-            json={'text': text, 'model_id': self._model_id},
+            json=body,
         )
         resp.raise_for_status()
         return resp.content

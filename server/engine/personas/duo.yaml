@@ -9,10 +9,14 @@ duo: 기본듀오
 voice_preset: chris-jessica
 voice_presets:
   chris-jessica:
-    ai_a: iP95p4xoKVk53GoZ742B # Chris — 젊고 캐주얼한 남성
+    ai_a: # Chris — 젊고 캐주얼한 남성. 기본이 느려 speed로 당김
+      id: iP95p4xoKVk53GoZ742B
+      speed: 1.1
     ai_b: cgSgspJ2msm6clMCkdW9 # Jessica — 밝고 생기있는 여성
   liam-laura:
-    ai_a: TX3LPaxmHKxFdv7VOQHJ # Liam — 젊고 또렷한 남성
+    ai_a: # Liam — 젊고 또렷한 남성
+      id: TX3LPaxmHKxFdv7VOQHJ
+      speed: 1.1
     ai_b: FGY2WhTYpPnrIDTdsKH5 # Laura — 상큼한 여성
 
 personas:

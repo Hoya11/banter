@@ -15,15 +15,22 @@ from .schema import Persona
 DUO_PATH = Path(__file__).parent / 'duo.yaml'
 
 
-def _resolve_voices(data: dict) -> dict[str, str | None]:
-    """활성 voice_preset의 {화자키: voice_id}를 푼다. 프리셋 미지정이면 빈 매핑."""
+def _resolve_voices(data: dict) -> dict[str, dict]:
+    """활성 voice_preset의 {화자키: {id, speed}}를 푼다. 프리셋 미지정이면 빈 매핑.
+
+    프리셋 항목은 문자열(id만) 또는 dict({id, speed}) 둘 다 허용 — 말 빠르기 같은
+    보이스 설정도 쌍 단위로 튜닝한다.
+    """
     preset = data.get('voice_preset')
     if not preset:
         return {}
     presets = data.get('voice_presets') or {}
     if preset not in presets:
         raise ValueError(f'voice_preset "{preset}"이 voice_presets에 없다')
-    return presets[preset]
+    resolved = {}
+    for key, val in presets[preset].items():
+        resolved[key] = {'id': val} if isinstance(val, str) else dict(val)
+    return resolved
 
 
 @lru_cache(maxsize=1)  # 매 발화마다 파일 IO를 반복하지 않는다 (이벤트 루프 블로킹 방지)
@@ -34,7 +41,11 @@ def load_personas() -> dict[str, Persona]:
         raise ValueError('duo.yaml에 personas가 없다')
     voices = _resolve_voices(data)
     return {
-        key: Persona(**val, voice_id=voices.get(key))
+        key: Persona(
+            **val,
+            voice_id=voices.get(key, {}).get('id'),
+            voice_speed=voices.get(key, {}).get('speed'),
+        )
         for key, val in data['personas'].items()
     }
 
@@ -68,7 +79,9 @@ def build_persona_prompt(
         '상대 말에 매번 동의·응원하지 마라 — 네 스탠스대로 반응해라(딴지·화제 전환도 자연스럽게).\n'
         '이력에 이미 나온 인사·리액션을 반복하지 마라. 직전 발화에 새로운 내용을 얹어 대화를 진전시켜라.\n'
         '네 발화 내용만 출력해라 — "이름:" 같은 화자 표시를 앞에 붙이지 마라.\n'
-        '이모지는 쓰지 마라 (음성으로 읽을 대사다).'
+        '이모지는 쓰지 마라 (음성으로 읽을 대사다).\n'
+        '감정은 오디오 태그로 표현할 수 있다: [sighs] [tired] [sarcastic] [laughs] [excited] [cheerfully] 중 '
+        '네 페르소나에 맞는 것을 문장 앞에 0~2개만. 남발하면 부자연스럽다.'
     )
     if intent:
         prompt += f'\n이번 발화 의도: {intent}. 이 결대로 말해라.'

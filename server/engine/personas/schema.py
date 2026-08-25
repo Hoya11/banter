@@ -11,7 +11,8 @@ class Persona(BaseModel):
 
     key: str  # 'ai_a' | 'ai_b' — 상태의 current_speaker와 일치
     name: str
-    voice_id: str | None  # Phase 2 TTS 보이스 (지금은 None)
+    voice_id: str | None  # TTS 보이스 (voice_presets에서 주입)
+    voice_speed: float | None = None  # 말 빠르기 (provider 지원 시, 1.0=기본)
     stance: str  # 기본 스탠스 — 대비의 핵심(케미의 절반)
     speech_style: str
     topic_bias: list[str]

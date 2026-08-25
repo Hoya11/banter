@@ -4,6 +4,8 @@
 없으면 기계적 교대로 폴백. 발화 생성은 페르소나 프롬프트 + supervisor 의도로.
 """
 
+import re
+
 from langgraph.graph import END, START, StateGraph
 
 from ..personas.loader import build_persona_prompt, get_persona
@@ -111,8 +113,27 @@ def limit_sentences(text: str, max_sentences: int = MAX_SENTENCES) -> str:
     return text[: cut + 1].strip()
 
 
+_AUDIO_TAG_RE = re.compile(r'\[[a-z]+(?: [a-z]+)?\]\s*|<break\s+[^>]*/>\s*')
+
+
+def strip_audio_tags(text: str) -> str:
+    """오디오 태그([sighs] 등)와 <break/>를 제거한다.
+
+    태그는 TTS(v3) 연기 지시용 — 화면·대화 이력에는 깨끗한 텍스트만 남긴다.
+    """
+    return _AUDIO_TAG_RE.sub('', text).strip()
+
+
 def finalize_utterance(raw: str, name: str) -> str:
-    """LLM 발화 원문에 공통 후처리(프리픽스 제거 → 문장 상한)를 적용한다."""
+    """LLM 발화 원문에 공통 후처리(프리픽스 제거 → 문장 상한 → 태그 제거)를 적용한다.
+
+    TTS용 태그 포함본이 필요하면 finalize_tagged를 쓴다.
+    """
+    return strip_audio_tags(finalize_tagged(raw, name))
+
+
+def finalize_tagged(raw: str, name: str) -> str:
+    """프리픽스 제거 + 문장 상한까지만 — 오디오 태그를 보존한 TTS용 최종본."""
     return limit_sentences(_strip_speaker_prefix(raw, name))
 
 

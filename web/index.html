@@ -68,40 +68,58 @@
         player.src = SILENT_WAV;
         player.play().catch(() => {});
       }
-      function enqueueAudio(b64) {
-        audioQueue.push(b64);
+      // 음성 동기 모드: 말풍선은 그 발화의 오디오가 "재생되는 순간" 표시한다(자막).
+      // 각 항목 재생이 끝나면 서버에 played ack — 서버가 재생 페이스에 맞춰 다음 턴을 낸다.
+      function enqueuePresentation(item) {
+        audioQueue.push(item); // {speaker, text, audio|null}
         if (!playing) playNext();
       }
       function playNext() {
         if (!audioQueue.length) { playing = false; return; }
         playing = true;
-        player.src = 'data:audio/mpeg;base64,' + audioQueue.shift();
-        player.play().catch(() => playNext());
+        const item = audioQueue.shift();
+        add(item.speaker, item.text); // 소리 시작과 함께 자막 표시
+        if (!item.audio) { ack(); playNext(); return; } // 합성 실패 → 텍스트만, 즉시 ack
+        player.src = 'data:audio/mpeg;base64,' + item.audio;
+        player.onended = () => { ack(); playNext(); };
+        player.onerror = () => { ack(); playNext(); };
+        player.play().catch(() => { ack(); playNext(); });
       }
-      // 클라이언트 barge — 유저가 입력하는 순간 재생 중인 목소리를 끊고 큐를 비운다
+      function ack() {
+        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'played' }));
+      }
+      // 클라이언트 barge — 유저가 입력하는 순간 재생 중인 목소리를 끊고 큐를 비운다.
+      // 버리는 항목들도 ack해서 서버 페이스 카운터가 어긋나지 않게 한다.
       function stopAudio() {
-        audioQueue.length = 0;
-        player.pause();
+        while (audioQueue.length) { audioQueue.shift(); ack(); }
+        if (playing) { player.onended = null; player.onerror = null; player.pause(); ack(); }
         playing = false;
       }
 
       const ws = new WebSocket('ws://' + location.host + '/ws');
-      let current = null; // 스트리밍 중인 AI 발화 버블
+      let voiceMode = false;
+      let current = null; // (텍스트 모드) 스트리밍 중인 AI 발화 버블
 
       ws.onmessage = (e) => {
         const d = JSON.parse(e.data);
-        if (d.type === 'start') {
-          current = add(d.speaker, ''); // 빈 버블로 시작
+        if (d.type === 'hello') {
+          voiceMode = d.voice; // 음성 모드면 토큰 라이브 표시 대신 오디오 동기 표시
+        } else if (d.type === 'start') {
+          current = voiceMode ? null : add(d.speaker, '');
         } else if (d.type === 'token') {
-          if (current) current.body.textContent += d.text; // 한 글자씩 append
+          if (current) current.body.textContent += d.text;
           log.scrollTop = log.scrollHeight;
         } else if (d.type === 'end') {
-          if (current) current.body.textContent = d.text; // 최종본(프리픽스 제거 반영)
-          current = null;
+          if (current) current.body.textContent = d.text;
+          current = null; // 음성 모드에선 audio 이벤트가 표시를 담당
         } else if (d.type === 'audio') {
-          enqueueAudio(d.audio); // 목소리는 별도 이벤트로 뒤따라 온다(비차단 TTS)
+          enqueuePresentation({ speaker: d.speaker, text: d.text, audio: d.audio });
         } else if (d.type === 'interrupted') {
-          if (current) current.body.textContent = (d.text || '') + ' —(끊김)';
+          if (voiceMode) {
+            if (d.text) add(d.speaker, d.text + ' —(끊김)'); // 끊긴 발화는 즉시 표시
+          } else if (current) {
+            current.body.textContent = (d.text || '') + ' —(끊김)';
+          }
           current = null;
         } else if (d.type === 'error') {
           if (current) current.wrap.remove(); // 실패한 턴의 빈 버블 제거
@@ -125,10 +143,10 @@
         const input = document.getElementById('msg');
         const v = input.value.trim();
         if (!v) return;
-        unlockAudio(); // 첫 제스처에서 오디오 재생 권한 확보
         stopAudio(); // 끼어드는 순간 AI 목소리를 즉시 끊는다 (클라이언트 barge)
+        unlockAudio(); // 첫 제스처에서 오디오 재생 권한 확보 (stop 뒤에 — unlock 재생을 끊지 않게)
         add('user', v); // 내 발화는 로컬에서 바로 표시
-        ws.send(v);
+        ws.send(JSON.stringify({ type: 'say', text: v }));
         input.value = '';
       };
     </script>

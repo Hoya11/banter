@@ -22,6 +22,7 @@ def test_ws_streams_tokens_then_end():
     app = create_app(FakeStream())  # supervisor None → 기계적 교대(첫 턴 ai_a)
     client = TestClient(app)
     with client.websocket_connect('/ws') as ws:
+        assert ws.receive_json() == {'type': 'hello', 'voice': False}  # 접속 시 모드 안내
         ws.send_text('하이')
         assert ws.receive_json() == {'type': 'start', 'speaker': 'ai_a'}
         assert ws.receive_json() == {'type': 'token', 'text': '안'}
@@ -34,6 +35,7 @@ def test_ws_stub_when_no_client():
     app = create_app()  # utterance client 없음 → 발화 스텁
     client = TestClient(app)
     with client.websocket_connect('/ws') as ws:
+        ws.receive_json()  # hello
         ws.send_text('하이')
         assert ws.receive_json()['type'] == 'start'
         assert ws.receive_json()['type'] == 'token'
@@ -70,6 +72,7 @@ def test_ws_barge_in_interrupts_stream():
     app = create_app(SlowStream(), max_turns=99, radio_sec=100)
     client = TestClient(app)
     with client.websocket_connect('/ws') as ws:
+        ws.receive_json()  # hello
         ws.send_text('시작')  # 첫 유저 발화 → AI 턴 시작
         assert ws.receive_json()['type'] == 'start'
         assert ws.receive_json()['type'] == 'token'  # 첫 토큰 나옴(스트림 진행 중)
@@ -96,6 +99,7 @@ def test_ws_stream_error_skips_turn():
     app = create_app(BrokenStream(), max_turns=1, radio_sec=0.01)
     client = TestClient(app)
     with client.websocket_connect('/ws') as ws:
+        ws.receive_json()  # hello
         ws.send_text('하이')
         types = [ws.receive_json()['type'] for _ in range(3)]
         assert types == ['start', 'token', 'error']  # end 없음
@@ -106,6 +110,7 @@ def test_ws_done_even_if_barge_on_final_turn():
     app = create_app(SlowStream(), max_turns=1, radio_sec=100)
     client = TestClient(app)
     with client.websocket_connect('/ws') as ws:
+        ws.receive_json()  # hello
         ws.send_text('시작')
         assert ws.receive_json()['type'] == 'start'
         assert ws.receive_json()['type'] == 'token'
@@ -119,15 +124,16 @@ def test_ws_done_even_if_barge_on_final_turn():
 
 
 class FakeTTS:
-    async def synthesize(self, text: str, voice: str) -> bytes:
+    async def synthesize(self, text: str, voice: str, speed=None) -> bytes:
         return b'FAKEAUDIO'
 
 
 def test_ws_audio_follows_end_when_tts():
-    # tts_client가 있으면 end 직후 별도 audio 이벤트가 온다 (비차단 TTS)
+    # tts_client가 있으면 end 뒤 별도 audio 이벤트(자막용 text 포함)가 온다 (비차단 TTS)
     app = create_app(FakeStream(), tts_client=FakeTTS())
     client = TestClient(app)
     with client.websocket_connect('/ws') as ws:
+        assert ws.receive_json() == {'type': 'hello', 'voice': True}  # 음성 모드 안내
         ws.send_text('하이')
         assert ws.receive_json()['type'] == 'start'
         ws.receive_json()  # token 안
@@ -136,4 +142,29 @@ def test_ws_audio_follows_end_when_tts():
         audio = ws.receive_json()
         assert audio['type'] == 'audio'
         assert audio['speaker'] == 'ai_a'
+        assert audio['text'] == '안녕'  # FE가 재생 시점에 표시할 자막
         assert audio['audio'] == base64.b64encode(b'FAKEAUDIO').decode('ascii')
+
+
+def test_ws_waits_played_ack_before_next_radio_turn():
+    # 음성 동기: played ack이 와야 다음 라디오 턴이 진행된다 (재생 페이스 조율)
+    import json as _json
+
+    app = create_app(FakeStream(), tts_client=FakeTTS(), max_turns=2, radio_sec=0.05)
+    client = TestClient(app)
+    with client.websocket_connect('/ws') as ws:
+        ws.receive_json()  # hello
+        ws.send_text('하이')
+        for _ in range(4):
+            ws.receive_json()  # start, token*2, end
+        assert ws.receive_json()['type'] == 'audio'
+        ws.send_text(_json.dumps({'type': 'played'}))  # 재생 완료 ack → 다음 턴 허용
+        types = []
+        for _ in range(20):
+            msg = ws.receive_json()
+            types.append(msg['type'])
+            if msg['type'] == 'audio':
+                ws.send_text(_json.dumps({'type': 'played'}))
+            if msg['type'] == 'done':
+                break
+        assert 'done' in types  # ack 기반 페이스로 세션이 정상 완주
