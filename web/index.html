@@ -226,7 +226,7 @@
         try {
           const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
           chunks = [];
-          recorder = new MediaRecorder(stream);
+          recorder = new MediaRecorder(stream, { audioBitsPerSecond: 128000 }); // 전사 정확도용 비트레이트
           recorder.ondataavailable = (e) => chunks.push(e.data);
           recorder.onstop = async () => {
             stream.getTracks().forEach((t) => t.stop());

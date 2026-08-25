@@ -184,7 +184,9 @@ def create_app(
             print(f'[stt] 전사 실패({type(exc).__name__}) — 무시')
             return 'noop', None
         if not text:
+            print('[stt] 빈 전사 — 무시')
             return 'noop', None
+        print(f'[stt] 전사: {text!r}')  # 인식 품질 확인용 (터미널에서 실제 발화와 대조)
         await ws.send_json({'type': 'you', 'text': text})
         return 'say', text
 

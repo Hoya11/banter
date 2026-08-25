@@ -19,7 +19,7 @@ app = create_app(
     # 보이스 조합은 duo.yaml의 voice_preset (chris-jessica | liam-laura).
     # premade 보이스 × v3는 무료 플랜에서 사용 가능 확인(2026-08 청음 비교).
     tts_client=ElevenLabsClient(model_id='eleven_v3'),
-    stt_client=OpenAIClient(),  # 🎤 push-to-talk 전사 (whisper-1)
+    stt_client=OpenAIClient(stt_model='gpt-4o-mini-transcribe'),  # 🎤 전사 (whisper-1보다 한국어 강함)
     # prefetch로 생성·합성이 재생 뒤에 숨으므로, 발화 사이 틈은 유저 발언 기회만큼만
     radio_sec=1.5,
 )

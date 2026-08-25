@@ -88,6 +88,8 @@ class OpenAIClient:
             model=self._stt_model,
             file=(f'speech.{ext}', audio, mime),
             language='ko',
+            # 도메인 힌트 — 반말 수다 맥락과 고유명을 알려주면 짧은 발화 인식률이 오른다
+            prompt='친구들과 나누는 한국어 반말 수다. 등장인물: 도현, 소은.',
         )
         return (resp.text or '').strip()
 
