@@ -42,6 +42,8 @@ WEB_DIR = Path(__file__).resolve().parents[2] / 'web'
 RADIO_SEC = 5.0  # 유저 침묵이 이 시간을 넘으면 AI 턴을 자동 진행(라디오 모드)
 MAX_TURNS = 12  # AI 발화가 이 수에 도달하면 마무리 후 종료(세션 캡)
 ACK_SEC = 30.0  # played ack 최대 대기 — 초과 시 장부를 리셋해 세션이 영구 지연되지 않게
+HOLD_SEC = 15.0  # 🎤 hold(발화권 잡기) 최대 유지 — 전사가 안 오면 라디오로 복귀
+MIN_VOICE_BYTES = 6000  # 이보다 짧은 녹음은 무시 (무음·스침 — 환각 전사 방지)
 DRAIN_SEC = 15.0  # 종료 전 남은 TTS 전송을 기다리는 상한 (마무리 멘트 유실 방지)
 FINISH_INTENT = '이제 대화를 자연스럽게 마무리하는 인사를 건네라'
 
@@ -69,6 +71,10 @@ def _parse_incoming(raw: str) -> tuple[str, object]:
             return ('say', text) if text else ('noop', None)
         if data.get('type') == 'voice' and data.get('audio'):
             return 'voice', {'audio': data['audio'], 'mime': data.get('mime') or 'audio/webm'}
+        if data.get('type') == 'hold':  # 🎤 누름 — 발화권 잡기 (내용은 전사 후 도착)
+            return 'hold', None
+        if data.get('type') == 'hold_off':  # 녹음 취소/무효 — 발화권 반납
+            return 'hold_off', None
     return 'noop', None
 
 
@@ -166,19 +172,31 @@ def create_app(
             finally:
                 queue.task_done()
 
-    async def _incoming(ws: WebSocket, raw: str) -> tuple[str, object]:
+    async def _incoming(ws: WebSocket, ctx: dict, raw: str) -> tuple[str, object]:
         """수신 메시지를 해석한다. voice(마이크 녹음)는 STT로 전사해 say로 합류시킨다.
 
-        전사 결과는 {'you', text}로 echo — 유저가 자기 발화 인식 결과를 확인.
-        STT 미설정·실패·빈 전사는 noop (대화 오염 방지).
+        hold/hold_off는 🎤 발화권 신호 — ctx['hold_until']을 갱신한다.
+        voice가 해소되면(성공이든 무효든) hold도 함께 푼다.
+        전사 결과는 {'you', text}로 echo. STT 미설정·실패·빈·초단 녹음은 noop.
         """
+        loop = asyncio.get_event_loop()
         kind, value = _parse_incoming(raw)
+        if kind == 'hold':
+            ctx['hold_until'] = loop.time() + HOLD_SEC
+            return 'hold', None
+        if kind == 'hold_off':
+            ctx['hold_until'] = 0.0
+            return 'noop', None
         if kind != 'voice':
             return kind, value
+        ctx['hold_until'] = 0.0  # 녹음이 도착했으니 발화권 대기는 해소 (결과 무관)
         if stt_client is None:
             return 'noop', None
         try:
             audio = base64.b64decode(value['audio'])
+            if len(audio) < MIN_VOICE_BYTES:  # 무음·스침 — 환각 전사 방지
+                print(f'[stt] 녹음 너무 짧음({len(audio)}B) — 무시')
+                return 'noop', None
             text = await stt_client.transcribe(audio, value['mime'])
         except Exception as exc:
             print(f'[stt] 전사 실패({type(exc).__name__}) — 무시')
@@ -345,6 +363,7 @@ def create_app(
 
         stream_task = asyncio.create_task(_run_stream())
         barge = None
+        grabbed = False  # 🎤 hold — 내용 없이 발화권만 잡힘 (전사는 뒤따라 옴)
         try:
             while True:
                 recv_task = asyncio.create_task(ws.receive_text())
@@ -352,9 +371,12 @@ def create_app(
                     {stream_task, recv_task}, return_when=asyncio.FIRST_COMPLETED
                 )
                 if recv_task in done:
-                    kind, value = await _incoming(ws, recv_task.result())
+                    kind, value = await _incoming(ws, ctx, recv_task.result())
                     if kind == 'say':
                         barge = value
+                        break
+                    if kind == 'hold' and not stream_task.done():
+                        grabbed = True  # 🎤 누르는 순간 즉시 발화 중단 — 유저 발화 묻힘 방지
                         break
                     if kind == 'played':  # ack·noop은 barge가 아니다 — 계속 듣는다
                         _on_ack(ctx, value)
@@ -367,8 +389,8 @@ def create_app(
             await _cancel(stream_task)  # 방치하면 'exception never retrieved'가 남는다
             raise
 
-        # 스트림이 아직이면(유저 발화가 먼저 도착) → barge-in.
-        if barge is not None and not stream_task.done():
+        # 스트림이 아직이면(유저 발화·hold가 먼저 도착) → barge-in.
+        if (barge is not None or grabbed) and not stream_task.done():
             await _cancel(stream_task)
             partial = strip_audio_tags(_strip_speaker_prefix(''.join(parts), name))
             await ws.send_json({'type': 'interrupted', 'speaker': speaker, 'text': partial})
@@ -413,7 +435,7 @@ def create_app(
                 raw = await asyncio.wait_for(ws.receive_text(), timeout=remain)
             except asyncio.TimeoutError:
                 continue  # deadline 검사로 되돌아감
-            kind, value = await _incoming(ws, raw)
+            kind, value = await _incoming(ws, ctx, raw)
             if kind == 'say':
                 return value
             if kind == 'played':
@@ -428,7 +450,8 @@ def create_app(
         state = initial_state()
         turn = 0
         pending_user = None  # barge-in으로 받은 유저 발화(다음 턴에 반영)
-        ctx = {'sent_seq': 0, 'acked_seq': 0, 'tts_queue': asyncio.Queue()}
+        loop = asyncio.get_event_loop()
+        ctx = {'sent_seq': 0, 'acked_seq': 0, 'hold_until': 0.0, 'tts_queue': asyncio.Queue()}
         worker = asyncio.create_task(_tts_worker(ws, ctx['tts_queue'], ctx))
         prefetch = None  # 재생 중 미리 만들어두는 다음 AI 턴 (§3.2)
         try:
@@ -449,6 +472,12 @@ def create_app(
                         said = await _wait_user(ws, ctx, ack_sec, until_acked=True)
                     if said is None:
                         said = await _wait_user(ws, ctx, radio_sec)
+                    # 🎤 hold 중 — 발화권이 유저에게 있으니 전사(say)가 올 때까지 새 턴을 열지 않는다
+                    while said is None:
+                        remain = ctx['hold_until'] - loop.time()
+                        if remain <= 0:
+                            break
+                        said = await _wait_user(ws, ctx, min(remain, 1.0))
                     if said is not None:
                         state = _add_user(state, said)
                         user_spoke = True

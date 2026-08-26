@@ -84,12 +84,12 @@ class OpenAIClient:
         if self._async_client is None:
             self._async_client = AsyncOpenAI(api_key=self._api_key)
         ext = mime.split('/')[-1].split(';')[0] or 'webm'
+        # prompt 힌트는 넣지 않는다 — 짧거나 조용한 오디오에서 모델이 힌트 문장을
+        # 그대로 환각 전사하는 부작용이 실측됨 (2026-08 로그)
         resp = await self._async_client.audio.transcriptions.create(
             model=self._stt_model,
             file=(f'speech.{ext}', audio, mime),
             language='ko',
-            # 도메인 힌트 — 반말 수다 맥락과 고유명을 알려주면 짧은 발화 인식률이 오른다
-            prompt='친구들과 나누는 한국어 반말 수다. 등장인물: 도현, 소은.',
         )
         return (resp.text or '').strip()
 

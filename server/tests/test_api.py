@@ -124,6 +124,35 @@ def test_ws_done_even_if_barge_on_final_turn():
         assert 'done' in types
 
 
+def test_ws_hold_grabs_floor_until_say():
+    # 🎤 hold: 누르는 순간 발화 중단 + 전사(say)가 올 때까지 새 턴이 열리지 않는다
+    import time as _time
+
+    app = create_app(SlowStream(), tts_client=FakeTTS(), max_turns=9, radio_sec=0.05)
+    client = TestClient(app)
+    with client.websocket_connect('/ws') as ws:
+        ws.receive_json()  # hello
+        ws.send_text('시작')
+        while ws.receive_json()['type'] != 'token':
+            pass  # 스트림 진행 중 확인
+        ws.send_text(json.dumps({'type': 'hold'}))  # 🎤 누름
+        msg = ws.receive_json()
+        while msg['type'] != 'interrupted':  # 내용 없이도 즉시 발화 중단
+            msg = ws.receive_json()
+        _time.sleep(0.5)  # radio_sec(0.05)의 10배 — hold 없으면 새 턴이 이미 열렸을 시간
+        ws.send_text(json.dumps({'type': 'say', 'text': '이제 말한다'}))
+        starts = 0
+        for _ in range(30):
+            msg = ws.receive_json()
+            if msg['type'] == 'start':
+                starts += 1
+            if msg['type'] == 'audio':
+                ws.send_text(json.dumps({'type': 'played', 'seq': msg['seq']}))
+            if msg['type'] == 'end':
+                break
+        assert starts == 1  # hold 동안 몰래 열린 턴 없음 — say 후의 응답 턴 하나뿐
+
+
 class FakeTTS:
     def __init__(self):
         self.calls = []  # (text, voice, speed) — 라우팅 검증용
@@ -256,9 +285,11 @@ def test_ws_voice_message_transcribed_and_joins_as_say():
     # 🎤 voice 메시지 → STT 전사 → 'you' echo → 유저 발화로 대화 합류 (기존 say 파이프 재사용)
     import json as _json
 
+    AUDIO = b'A' * 8000  # MIN_VOICE_BYTES 이상 (무음 필터 통과)
+
     class FakeSTT:
         async def transcribe(self, audio: bytes, mime: str = 'audio/webm') -> str:
-            assert audio == b'AUDIODATA'
+            assert audio == AUDIO
             return '음성으로 말했어요'
 
     class RecStream:
@@ -275,7 +306,7 @@ def test_ws_voice_message_transcribed_and_joins_as_say():
     with client.websocket_connect('/ws') as ws:
         hello = ws.receive_json()
         assert hello['stt'] is True  # FE가 🎤 버튼을 보여줄 근거
-        b64 = base64.b64encode(b'AUDIODATA').decode('ascii')
+        b64 = base64.b64encode(AUDIO).decode('ascii')
         ws.send_text(_json.dumps({'type': 'voice', 'audio': b64, 'mime': 'audio/webm'}))
         assert ws.receive_json() == {'type': 'you', 'text': '음성으로 말했어요'}  # 전사 echo
         assert ws.receive_json()['type'] == 'start'  # 전사가 유저 발화로 처리돼 턴 시작

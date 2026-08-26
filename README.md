@@ -83,6 +83,7 @@ PYTHONPATH=. uv run uvicorn api.main:app --reload
 - [PRD](docs/prd-v0.1.md) — 제품 정의, 단계별 범위, 성공 지표
 - [엔진 설계](docs/engine-design-v0.1.md) — turn-taking·끼어들기·지연 설계
 - [결정 기록](docs/decisions.md) — 아키텍처 선택의 이유들 (D-001~008)
+- [트러블슈팅](docs/troubleshooting.md) — 실사용 문제 → 진단 → 개선 히스토리
 - [실험 기록](docs/experiments/) — 지연 실측, judge 점수 추이, TTS 청음 비교
 - [Phase 1 계획](docs/phase-1-plan.md) / [실패 기록](docs/failures.md)
 

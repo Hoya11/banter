@@ -223,6 +223,8 @@
       async function startRec() {
         stopAudio(); // 말하려는 순간 AI 목소리를 끊는다 (barge)
         unlockAudio();
+        // 🎤 누르는 즉시 발화권 잡기 — 서버가 진행 중 발화를 끊고 새 턴을 열지 않는다
+        ws.send(JSON.stringify({ type: 'hold' }));
         try {
           const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
           chunks = [];
@@ -231,7 +233,10 @@
           recorder.onstop = async () => {
             stream.getTracks().forEach((t) => t.stop());
             const blob = new Blob(chunks, { type: recorder.mimeType });
-            if (blob.size < 1500) return; // 스치듯 눌린 짧은 녹음은 무시
+            if (blob.size < 8000) { // 스치듯 눌린 짧은 녹음 — 발화권 반납
+              ws.send(JSON.stringify({ type: 'hold_off' }));
+              return;
+            }
             // 전사되는 동안의 무반응 공백을 없앤다 — 즉시 자리 표시
             pendingStt = add('user', '🎤 …');
             const placed = pendingStt;
@@ -246,6 +251,7 @@
           recorder.start();
           micBtn.classList.add('rec');
         } catch (e) {
+          ws.send(JSON.stringify({ type: 'hold_off' })); // 권한 실패 — 발화권 반납
           alert('마이크 권한이 필요해요');
         }
       }
