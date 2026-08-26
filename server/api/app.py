@@ -35,7 +35,13 @@ from engine.graph.graph import (
     strip_audio_tags,
 )
 from engine.graph.state import initial_state
-from engine.graph.supervisor import select_next
+from engine.graph.supervisor import (
+    _mechanical_next,
+    build_unified_prompt,
+    parse_unified_header,
+    select_next,
+    split_unified,
+)
 from engine.personas.loader import get_persona
 
 WEB_DIR = Path(__file__).resolve().parents[2] / 'web'
@@ -107,6 +113,7 @@ def create_app(
     max_turns: int = MAX_TURNS,
     radio_sec: float = RADIO_SEC,
     ack_sec: float = ACK_SEC,
+    unified: bool = False,  # v2 통합 생성(D-003) — 화자 선정+발화를 한 호출로
 ) -> FastAPI:
     """WS 채팅 앱을 만든다. LLM/TTS/STT client를 주입받아(테스트는 fake) 엔진을 구동한다."""
     app = FastAPI()
@@ -237,20 +244,33 @@ def create_app(
         재생 종료 시 즉시 방출할 완성품을 만든다. 유저가 개입하면 폐기된다
         (유저 침묵 전제로 만든 맥락이라 재사용 불가 — prefetch의 비용).
         """
-        loop = asyncio.get_event_loop()
-        sel = await loop.run_in_executor(None, select_next, state, supervisor_client)
-        pre = {**state, **sel}
-        if finish:
-            pre = {**pre, 'current_intent': FINISH_INTENT}
-        system, user, speaker = prepare_utterance(pre)
-        name = get_persona(speaker).name
-        parts: list[str] = []
-        if utterance_client is None:
-            parts.append(f'({speaker} 발화 스텁)')
+        if unified:
+            # v2(D-003): 한 호출로 화자+대사 — supervisor 호출 없음
+            system, user = build_unified_prompt(state, finish=finish)
+            parts: list[str] = []
+            if utterance_client is None:
+                parts.append('{"next_speaker": "ai_a"}\n(발화 스텁)')
+            else:
+                async for token in utterance_client.complete_stream(system, user):
+                    parts.append(token)
+            sel, text_raw = split_unified(''.join(parts), state)
+            speaker = sel['current_speaker']
+            tagged = finalize_tagged(text_raw.strip(), get_persona(speaker).name)
         else:
-            async for token in utterance_client.complete_stream(system, user):
-                parts.append(token)
-        tagged = finalize_tagged(''.join(parts), name)
+            loop = asyncio.get_event_loop()
+            sel = await loop.run_in_executor(None, select_next, state, supervisor_client)
+            pre = {**state, **sel}
+            if finish:
+                pre = {**pre, 'current_intent': FINISH_INTENT}
+            system, user, speaker = prepare_utterance(pre)
+            name = get_persona(speaker).name
+            parts = []
+            if utterance_client is None:
+                parts.append(f'({speaker} 발화 스텁)')
+            else:
+                async for token in utterance_client.complete_stream(system, user):
+                    parts.append(token)
+            tagged = finalize_tagged(''.join(parts), name)
         clean = strip_audio_tags(tagged)
         audio = await _synthesize(speaker, tagged) if (voice_mode and clean) else None
         return {'sel': sel, 'speaker': speaker, 'clean': clean, 'audio': audio}
@@ -291,15 +311,42 @@ def create_app(
 
         반환: (새 state, barge_text) — barge_text가 있으면 유저가 끼어든 것.
         """
-        loop = asyncio.get_event_loop()
-        sel = await loop.run_in_executor(None, select_next, state, supervisor_client)
-        state = {**state, **sel}
-        if finish:
-            state = {**state, 'current_intent': FINISH_INTENT}
-        system, user, speaker = prepare_utterance(state)
-        name = get_persona(speaker).name
+        # unified(v2)는 화자를 스트림의 첫 줄(헤더)이 정한다 — 그때까지 hd가 비어 있다
+        hd = {'speaker': None, 'name': None, 'sel': None}
+        if unified:
+            system, user = build_unified_prompt(state, finish=finish)
+        else:
+            loop = asyncio.get_event_loop()
+            sel = await loop.run_in_executor(None, select_next, state, supervisor_client)
+            state = {**state, **sel}
+            if finish:
+                state = {**state, 'current_intent': FINISH_INTENT}
+            system, user, speaker_v1 = prepare_utterance(state)
+            hd['speaker'] = speaker_v1
+            hd['name'] = get_persona(speaker_v1).name
+            await ws.send_json({'type': 'start', 'speaker': speaker_v1})
 
-        await ws.send_json({'type': 'start', 'speaker': speaker})
+        async def _resolve_header(first_line: str) -> bool:
+            """v2 헤더를 파싱해 화자를 확정하고 start를 보낸다. 반환: 헤더가 유효했는가."""
+            selp = parse_unified_header(first_line.strip(), state)
+            ok = selp is not None
+            if not ok:  # 규칙 위반·파싱 실패 — 기계적 교대 폴백 (본문은 살릴 수 있음)
+                print('[unified] 헤더 불량 — 기계적 교대 폴백')
+                prev = state['current_speaker']
+                nxt = _mechanical_next(prev, state['messages'])
+                selp = {
+                    'current_speaker': nxt,
+                    'consecutive_ai_turns': 1 if prev in (None, 'user') else state['consecutive_ai_turns'] + 1,
+                    'current_intent': None,
+                    'topic_stack': list(state.get('topic_stack') or []),
+                    'topic_turns': state.get('topic_turns', 0),
+                }
+            hd['sel'] = selp
+            hd['speaker'] = selp['current_speaker']
+            hd['name'] = get_persona(hd['speaker']).name
+            await ws.send_json({'type': 'start', 'speaker': hd['speaker']})
+            return ok
+
         parts: list[str] = []  # barge 시 부분 발화 복원용 원문 토큰
         emitted: list[str] = []  # 확정된 문장(clean) — 자막·이력용
         flags = {'first': True, 'extended': False}
@@ -321,7 +368,7 @@ def create_app(
             """완성 문장 하나를 확정한다 — 자막·이력엔 clean, TTS엔 태그 보존본."""
             raw = sentence_raw
             if flags['first']:
-                raw = _strip_speaker_prefix(raw, name)
+                raw = _strip_speaker_prefix(raw, hd['name'])
                 flags['first'] = False
             clean = strip_audio_tags(raw).strip()
             if not clean:
@@ -330,27 +377,45 @@ def create_app(
                 return False
             emitted.append(clean)
             if voice_mode:
-                await ctx['tts_queue'].put((speaker, clean, raw, len(emitted) > 1))
+                await ctx['tts_queue'].put((hd['speaker'], clean, raw, len(emitted) > 1))
             return True
 
         async def _run_stream():
             # 문장 단위 flush(§3.1): 첫 문장이 완성되는 즉시 합성 큐로 보낸다 —
             # 발화 전체 생성·합성을 기다리지 않아 유저 응답의 첫 소리가 단축된다.
+            # unified(v2)는 첫 줄(헤더)을 버퍼링해 화자를 먼저 확정한다.
             if utterance_client is None:
-                text = f'({speaker} 발화 스텁)'
+                if unified:
+                    await _resolve_header('{"next_speaker": "ai_a"}')
+                text = f"({hd['speaker']} 발화 스텁)"
                 parts.append(text)
                 await ws.send_json({'type': 'token', 'text': text})
                 await _emit(text)
                 return
+            header_pending = unified
             buffer = ''
             async for token in utterance_client.complete_stream(system, user):
                 parts.append(token)
-                await ws.send_json({'type': 'token', 'text': token})
-                buffer += token
+                if header_pending:
+                    buffer += token
+                    if '\n' not in buffer:
+                        continue
+                    first, _, buffer = buffer.partition('\n')
+                    await _resolve_header(first)
+                    header_pending = False
+                    if buffer:  # 헤더 뒤에 딸려온 본문 조각도 화면에 흘린다
+                        await ws.send_json({'type': 'token', 'text': buffer})
+                else:
+                    await ws.send_json({'type': 'token', 'text': token})
+                    buffer += token
                 done_sentences, buffer = pop_sentences(buffer)
                 for s in done_sentences:
                     if not await _emit(s):
                         return  # 상한 도달 — 남은 토큰 생성도 중단(비용 절약)
+            if header_pending:
+                # 개행 없이 끝남 — 한 줄이 헤더인지 대사인지 판별
+                ok = await _resolve_header(buffer)
+                buffer = '' if (ok or buffer.lstrip().startswith('{')) else buffer
             if buffer.strip():
                 await _emit(buffer.strip())  # 종결부호 없는 잔여(반말체) flush
 
@@ -389,28 +454,34 @@ def create_app(
             await _cancel(stream_task)  # 방치하면 'exception never retrieved'가 남는다
             raise
 
+        # unified: 헤더가 정한 화자·화제 갱신을 상태에 반영 (v1은 이미 반영됨)
+        if hd['sel'] is not None:
+            state = {**state, **hd['sel']}
+
         # 스트림이 아직이면(유저 발화·hold가 먼저 도착) → barge-in.
         if (barge is not None or grabbed) and not stream_task.done():
             await _cancel(stream_task)
-            partial = strip_audio_tags(_strip_speaker_prefix(''.join(parts), name))
-            await ws.send_json({'type': 'interrupted', 'speaker': speaker, 'text': partial})
+            if hd['speaker'] is None:  # 헤더 전 개입 — 아무것도 표시된 게 없다
+                return state, barge
+            partial = strip_audio_tags(_strip_speaker_prefix(''.join(parts), hd['name']))
+            await ws.send_json({'type': 'interrupted', 'speaker': hd['speaker'], 'text': partial})
             if partial:  # 빈 부분 발화는 이력에 남기지 않는다(프롬프트 오염 방지)
-                state = _apply_utterance(state, speaker, partial, interrupted=True)
+                state = _apply_utterance(state, hd['speaker'], partial, interrupted=True)
             return state, barge
 
         # 스트림이 에러로 끝났으면 부분 발화를 확정하지 않는다(빈/잘린 발화의 이력 오염 방지)
         if stream_task.exception() is not None:
             print(f'[stream] 발화 생성 실패({type(stream_task.exception()).__name__}) — 턴 건너뜀')
-            await ws.send_json({'type': 'error', 'speaker': speaker})
+            await ws.send_json({'type': 'error', 'speaker': hd['speaker']})
             return state, barge
 
         # 문장들은 스트리밍 중 이미 확정·합성 큐 전송됨 — 여기선 발화 전체를 마감만
         clean = ' '.join(emitted)
         if not clean:  # 빈 발화는 확정하지 않는다 ('도현: ' 이력 오염 방지)
-            await ws.send_json({'type': 'error', 'speaker': speaker})
+            await ws.send_json({'type': 'error', 'speaker': hd['speaker']})
             return state, barge
-        await ws.send_json({'type': 'end', 'speaker': speaker, 'text': clean})
-        return _apply_utterance(state, speaker, clean), barge
+        await ws.send_json({'type': 'end', 'speaker': hd['speaker'], 'text': clean})
+        return _apply_utterance(state, hd['speaker'], clean), barge
 
     async def _wait_user(
         ws: WebSocket, ctx: dict, timeout: float, until_acked: bool = False

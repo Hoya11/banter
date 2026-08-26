@@ -137,3 +137,111 @@ def select_next(state: ConvState, client=None) -> dict:
         'topic_stack': stack,
         'topic_turns': topic_turns,
     }
+
+
+# ---------- v2: 통합 생성 (D-003) ----------
+# 화자 선정과 발화 생성을 한 LLM 호출로 — 턴당 호출 -1 (지연·비용 절감).
+# 출력 계약: 첫 줄 = JSON 헤더 {next_speaker, intent, topic}, 둘째 줄부터 = 그 화자의 대사.
+# 규칙 가드·topic 갱신은 v1과 같은 코드를 재사용한다 (전략이 바뀌어도 가드는 불변, §1.3).
+
+
+def build_unified_prompt(state: ConvState, finish: bool = False) -> tuple[str, str]:
+    """v2 통합 생성용 (system, user) 프롬프트 — 두 페르소나·규칙·화제 컨텍스트 포함.
+
+    finish=True면 세션 캡 도달 — 마무리 인사 지시를 얹는다.
+    """
+    personas = load_personas()
+    roster = '\n'.join(
+        f'- {k} "{p.name}": {p.stance} / 말투: {p.speech_style} / 관심사: {", ".join(p.topic_bias)}'
+        for k, p in personas.items()
+    )
+    history = (
+        '\n'.join(
+            f'{m["speaker"]}: {m["text"]}' + (' [말하다 끊김]' if m.get('interrupted') else '')
+            for m in state['messages']
+        )
+        or '(아직 발화 없음)'
+    )
+    # 다음 턴의 AI 연속 카운트를 예측해 소환 지시 여부를 결정 (§1.3)
+    prev = state['current_speaker']
+    next_consec = 1 if prev in (None, 'user') else state['consecutive_ai_turns'] + 1
+    system = (
+        '너는 3자 수다(유저 1명 + AI 2명)의 다음 발화를 만든다. 누가 말할지 정하고, 그 사람으로서 말해라.\n'
+        f'AI 페르소나:\n{roster}\n'
+        '규칙:\n'
+        '- 직전 화자가 연속으로 말하지 않는다.\n'
+        '- 의도는 다양하게: 딴지/반박, 구체적 경험담, 상대 놀리기, 화제 살짝 틀기, 짧은 리액션, 되묻기, 유저 소환. '
+        '직전 두 턴과 같은 유형 반복 금지(특히 동의+질문 패턴 연속 금지).\n'
+        '- 이력에 나온 인사·리액션 반복 금지, 직전 발화에 새 내용을 얹어 진전.\n'
+        '- 직전 발화가 [말하다 끊김]이면 끊긴 화자가 양보하고 유저 발화에 반응(매번 사과 금지).\n'
+        '- 발화는 한국어 반말 1~2문장, 이모지 금지. 감정은 [sighs] [tired] [sarcastic] [laughs] [excited] [cheerfully] '
+        '태그 0~2개로, 쉼은 <break time="0.4s" />.\n'
+        + ('- 지금은 유저(사람)에게 가볍게 말을 걸어 대화에 끌어들여라.\n' if next_consec > 0 and next_consec % 3 == 0 else '')
+        + ('- 지금은 세션 마무리 — 대화를 자연스럽게 끝내는 인사를 해라.\n' if finish else '')
+        + '출력 형식(정확히 지켜라):\n'
+        '첫 줄: {"next_speaker": "ai_a"|"ai_b", "intent": "짧은 의도", "topic": "화제(2~6단어)"}\n'
+        '둘째 줄부터: 선택한 화자의 발화만 (화자 표시·따옴표 없이)'
+    )
+    stack = state.get('topic_stack') or []
+    lines = []
+    if stack:
+        lines.append(f'현재 화제: {stack[-1]}')
+        if stack[:-1]:
+            lines.append(f'보류 중인 화제: {", ".join(stack[:-1])}')
+    if state.get('topic_turns', 0) >= TOPIC_STALE_TURNS:
+        lines.append('이 화제가 오래 이어졌다. 새 화제를 꺼내거나 보류 화제로 자연스럽게 넘어가라.')
+    topic_ctx = ('\n' + '\n'.join(lines)) if lines else ''
+    user = f'대화 이력:\n{history}{topic_ctx}\n\n다음 발화를 만들어라.'
+    return system, user
+
+
+def parse_unified_header(header_line: str, state: ConvState) -> dict | None:
+    """v2 첫 줄(JSON 헤더)을 v1과 동일한 가드·화제 갱신을 거친 sel dict로 만든다.
+
+    화자가 무효·연속이면 None — 호출부가 기계적 교대로 폴백한다.
+    (v1과 달리 대사가 이미 그 화자 말투로 생성되므로 화자만 바꿔치기할 수 없다.)
+    """
+    prev = state['current_speaker']
+    try:
+        head = json.loads(header_line)
+        nxt = head['next_speaker']
+    except Exception:
+        return None
+    if nxt not in ('ai_a', 'ai_b') or (nxt == prev and prev in ('ai_a', 'ai_b')):
+        return None  # 규칙 가드 위반 — 통합 출력은 정정 불가라 폴백
+    intent = _sanitize_intent(head.get('intent'))
+    topic = _sanitize_intent(head.get('topic'))
+    stack, topic_turns = _update_topics(
+        list(state.get('topic_stack') or []), state.get('topic_turns', 0), topic and topic[:40]
+    )
+    consecutive = 1 if prev in (None, 'user') else state['consecutive_ai_turns'] + 1
+    return {
+        'current_speaker': nxt,
+        'consecutive_ai_turns': consecutive,
+        'current_intent': intent,
+        'topic_stack': stack,
+        'topic_turns': topic_turns,
+    }
+
+
+def split_unified(raw: str, state: ConvState) -> tuple[dict, str]:
+    """v2 원문을 (sel, 대사 원문)으로 분리한다. 헤더 불량이면 기계적 교대로 폴백.
+
+    폴백 시 첫 줄이 JSON 흉내({로 시작)면 버리고, 아니면 전체를 대사로 살린다.
+    """
+    first, _, rest = raw.partition('\n')
+    sel = parse_unified_header(first.strip(), state)
+    if sel is not None:
+        return sel, rest
+    print('[unified] 헤더 파싱 실패 — 기계적 교대 폴백')
+    prev = state['current_speaker']
+    nxt = _mechanical_next(prev, state['messages'])
+    consecutive = 1 if prev in (None, 'user') else state['consecutive_ai_turns'] + 1
+    fallback = {
+        'current_speaker': nxt,
+        'consecutive_ai_turns': consecutive,
+        'current_intent': None,
+        'topic_stack': list(state.get('topic_stack') or []),
+        'topic_turns': state.get('topic_turns', 0),
+    }
+    return fallback, (rest if first.lstrip().startswith('{') else raw)

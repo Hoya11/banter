@@ -137,3 +137,13 @@ supervisor가 화자·의도와 함께 현재 화제를 판단 → 코드가 top
 - user_participates GO 8.2 / topic_switch GO 7.6 / barge_in GO 7.6 — 유저 상호작용 시나리오 전부 GO.
 - radio_silence NO-GO — 유저 발화 0개의 구조적 결과. 라디오 모드 user_inclusion 평가는 정교화 대상(실제 실패 아님).
 - **judge 신뢰성 확인 → 판정을 믿을 수 있음.** "3자 발화권 중재의 텍스트 검증"은 유저 상호작용 시나리오에서 성립.
+
+## 2026-08-26 — D-003 게이트: supervisor v2(통합 생성) vs v1 (n=3)
+
+| 시나리오 | v1 종합 | v2 종합 | 주요 변화 |
+|---|---|---|---|
+| user_participates | 8.08 | **8.33** | user_inclusion 7.7→9.0 |
+| radio_long | 8.26 | **8.47** | context 8.3→9.0, user_incl 6.7→7.7 |
+
+게이트(동등 이상) 통과 → v2 이행. "화자 선택과 대사가 한 사고 안에서 정합"되는 효과로
+유저 반영이 오히려 개선. liveliness 9.3→8.7은 표본 변동 범위.

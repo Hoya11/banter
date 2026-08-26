@@ -149,6 +149,45 @@ def test_stale_topic_injects_switch_directive():
     assert '화제 전환' not in user_fresh
 
 
+def test_unified_split_and_guards():
+    # v2 헤더 파싱: 정상 헤더 → sel + 대사 분리 / 연속 화자·불량 헤더 → 기계적 폴백
+    from engine.graph.supervisor import split_unified
+
+    state = _state('ai_a', 1)
+    raw = '{"next_speaker": "ai_b", "intent": "딴지", "topic": "야근"}\n야근을 왜 자랑해.'
+    sel, text = split_unified(raw, state)
+    assert sel['current_speaker'] == 'ai_b'
+    assert sel['current_intent'] == '딴지'
+    assert sel['topic_stack'] == ['야근']
+    assert text.strip() == '야근을 왜 자랑해.'
+
+    # 직전 화자를 또 지목 → 규칙 가드 위반 → 기계적 교대 폴백 (본문은 살림)
+    raw_dup = '{"next_speaker": "ai_a", "intent": "x", "topic": "y"}\n그래도 내가 말할래.'
+    sel, text = split_unified(raw_dup, state)
+    assert sel['current_speaker'] == 'ai_b'  # 폴백 교대
+    assert text.strip() == '그래도 내가 말할래.'
+
+    # 헤더가 JSON이 아니면 전체를 대사로 살린다
+    sel, text = split_unified('그냥 바로 말부터 한다.\n둘째 줄.', state)
+    assert sel['current_speaker'] == 'ai_b'
+    assert '그냥 바로 말부터 한다.' in text
+
+
+def test_unified_turn_produces_message():
+    # v2 한 턴: 한 호출로 화자+대사가 나온다 (supervisor 노드 없음)
+    from engine.graph.graph import unified_turn
+
+    class UnifiedFake:
+        def complete(self, system: str, user: str) -> str:
+            return '{"next_speaker": "ai_b", "intent": "리액션", "topic": "저녁"}\n[laughs] 배고프다. 뭐 먹지?'
+
+    out = unified_turn(_state('ai_a', 1), UnifiedFake())
+    assert out['current_speaker'] == 'ai_b'
+    assert out['messages'][0]['speaker'] == 'ai_b'
+    assert out['messages'][0]['text'] == '배고프다. 뭐 먹지?'  # 태그 제거·상한 적용
+    assert out['topic_stack'] == ['저녁']
+
+
 def test_graph_one_pass():
     g = build_graph()
     result = g.invoke(_state(None))

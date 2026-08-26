@@ -9,7 +9,7 @@ from pathlib import Path
 
 import yaml
 
-from ..graph.graph import build_graph
+from ..graph.graph import build_graph, build_unified_graph
 from ..graph.state import initial_state
 from .judge import judge
 from .schema import JudgeResult, Turn
@@ -107,9 +107,17 @@ def run_scenario(
     judge_client,
     rubric_version: str = 'v1',
     supervisor_client=None,
+    unified: bool = False,
 ) -> tuple[list[Turn], JudgeResult, bool]:
-    """시나리오 step(ai/user)을 순서대로 실행하고 전체 대화를 채점한다."""
-    graph = build_graph(utterance_client, supervisor_client)
+    """시나리오 step(ai/user)을 순서대로 실행하고 전체 대화를 채점한다.
+
+    unified=True면 v2 통합 생성 그래프(D-003) — supervisor 호출 없이 한 호출/턴.
+    """
+    graph = (
+        build_unified_graph(utterance_client)
+        if unified
+        else build_graph(utterance_client, supervisor_client)
+    )
     state = initial_state()
     for step in steps:
         if step['type'] == 'user':
@@ -176,7 +184,12 @@ def score_transcript_repeated(
 
 
 def run_scenario_repeated(
-    steps: list[dict], utterance_client, judge_client, n: int = 3, supervisor_client=None
+    steps: list[dict],
+    utterance_client,
+    judge_client,
+    n: int = 3,
+    supervisor_client=None,
+    unified: bool = False,
 ) -> dict:
     """시나리오를 N회 실행·채점해 항목별 통계를 낸다 (대화 변동 + judge 변동).
 
@@ -186,7 +199,11 @@ def run_scenario_repeated(
     for _ in range(n):
         try:
             _, result, _ = run_scenario(
-                steps, utterance_client, judge_client, supervisor_client=supervisor_client
+                steps,
+                utterance_client,
+                judge_client,
+                supervisor_client=supervisor_client,
+                unified=unified,
             )
             results.append(result)
         except Exception as exc:

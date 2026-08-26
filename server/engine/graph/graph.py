@@ -187,3 +187,30 @@ def build_graph(utterance_client=None, supervisor_client=None):
     g.add_edge('generate', 'update')
     g.add_edge('update', END)
     return g.compile()
+
+
+def unified_turn(state: ConvState, client) -> dict:
+    """v2 통합 생성 한 턴 (non-stream, 평가 하네스용) — 화자 선정+발화를 한 호출로 (D-003)."""
+    from .supervisor import build_unified_prompt, split_unified
+
+    system, user = build_unified_prompt(state)
+    sel, text_raw = split_unified(client.complete(system, user), state)
+    speaker = sel['current_speaker']
+    text = finalize_utterance(text_raw.strip(), get_persona(speaker).name)
+    msg = {'speaker': speaker, 'text': text, 'ts': 0.0, 'interrupted': False}
+    return {**sel, 'messages': [msg]}
+
+
+def build_unified_graph(utterance_client):
+    """v2 그래프 — [통합 턴] → [상태 갱신]. supervisor 노드가 없다 (호출 -1)."""
+
+    def turn(state: ConvState) -> dict:
+        return unified_turn(state, utterance_client)
+
+    g = StateGraph(ConvState)
+    g.add_node('turn', turn)
+    g.add_node('update', update_state)
+    g.add_edge(START, 'turn')
+    g.add_edge('turn', 'update')
+    g.add_edge('update', END)
+    return g.compile()

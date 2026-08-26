@@ -22,4 +22,7 @@ app = create_app(
     stt_client=OpenAIClient(stt_model='gpt-4o-mini-transcribe'),  # 🎤 전사 (whisper-1보다 한국어 강함)
     # prefetch로 생성·합성이 재생 뒤에 숨으므로, 발화 사이 틈은 유저 발언 기회만큼만
     radio_sec=1.5,
+    # supervisor v2(D-003): judge 게이트 통과(v1 8.08/8.26 → v2 8.33/8.47, n=3)로 이행.
+    # 턴당 LLM 호출 -1 → 유저 응답 지연·비용 동시 절감
+    unified=True,
 )

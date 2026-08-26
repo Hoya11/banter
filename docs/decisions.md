@@ -38,3 +38,12 @@ experiments/에 남긴다. 없는 것보다 박아두는 게 자기기만·범�
 Phase 1 목적은 평가이지 기록 축적이 아님. judge/trace 데이터는 Langfuse에 남으므로
 PostgreSQL과 기록 채널이 중복된다. DB 스키마 선행은 Phase 1 오버엔지니어링 —
 인메모리 세션으로 실험 속도를 우선하고, 영속화 도입은 Phase 2~3에서 재검토.
+
+## D-003 이행 완료 (2026-08-26) — supervisor v1 → v2(통합 생성)
+게이트(judge 동등 이상, n=3) 통과로 이행:
+- user_participates: v1 8.08 → v2 8.33 (user_inclusion 7.7→9.0)
+- radio_long: v1 8.26 → v2 8.47 (context 8.3→9.0)
+v2 출력 계약: 첫 줄 JSON 헤더(next_speaker/intent/topic) + 둘째 줄부터 대사.
+규칙 가드·topic 갱신은 v1 코드 재사용, 헤더 불량 시 기계적 교대 폴백.
+효과: 턴당 LLM 호출 -1 (supervisor ~1s가 유저 응답 임계 경로에서 제거, 비용 절감).
+v1 경로는 폴백·비교용으로 유지.

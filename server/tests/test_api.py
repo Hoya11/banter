@@ -124,6 +124,34 @@ def test_ws_done_even_if_barge_on_final_turn():
         assert 'done' in types
 
 
+def test_ws_unified_streams_header_then_sentences():
+    # v2 통합 생성 스트리밍: 첫 줄 헤더로 화자 확정(start) → 문장 단위 audio (호출 -1)
+    class UnifiedStream:
+        async def complete_stream(self, system: str, user: str):
+            for token in ['{"next_speaker": "ai_b", "intent": "리액션", "topic": "저녁"}\n', '배고프', '다. ', '뭐 먹지?']:
+                yield token
+
+    app = create_app(UnifiedStream(), tts_client=FakeTTS(), max_turns=1, radio_sec=100, unified=True)
+    client = TestClient(app)
+    with client.websocket_connect('/ws') as ws:
+        ws.receive_json()  # hello
+        ws.send_text('하이')
+        events = []
+        for _ in range(30):
+            msg = ws.receive_json()
+            events.append(msg)
+            if msg['type'] == 'audio':
+                ws.send_text(json.dumps({'type': 'played', 'seq': msg['seq']}))
+            if msg['type'] == 'done':
+                break
+        start = next(e for e in events if e['type'] == 'start')
+        assert start['speaker'] == 'ai_b'  # 헤더가 정한 화자
+        audio_texts = [e['text'] for e in events if e['type'] == 'audio']
+        assert audio_texts == ['배고프다.', '뭐 먹지?']  # 헤더 제외, 문장 단위
+        tokens = [e['text'] for e in events if e['type'] == 'token']
+        assert all('next_speaker' not in t for t in tokens)  # 헤더는 화면에 새지 않는다
+
+
 def test_ws_hold_grabs_floor_until_say():
     # 🎤 hold: 누르는 순간 발화 중단 + 전사(say)가 올 때까지 새 턴이 열리지 않는다
     import time as _time
