@@ -6,13 +6,13 @@
 누가 언제 말할지(발화권), 유저가 끼어들면 누가 양보할지, 침묵하면 누가 이어갈지를
 전부 시스템이 중재해야 합니다. 이 "3자 발화권 중재"가 궁금해서 시작한 프로젝트입니다.
 
-> 🎬 데모 영상: (Phase 3 완료 후 추가 예정)
+> 데모 영상: Phase 3 완료 후 추가 예정
 
 ## 어떤 경험인가
 
-- 방에 들어가면 **도현**(냉소적 현실주의자)과 **소은**(낙천적 응원러)이 수다를 떨고 있다
+- `대화 시작`을 누르면 **도현**(냉소적 현실주의자)과 **소은**(낙천적 응원러)이 수다를 시작한다
 - 가만히 들으면 둘이 계속 티키타카한다 — **라디오 모드**
-- 🎤 버튼을 누르고 말하면(또는 타이핑하면) 말하던 AI가 **발화를 멈추고 양보**한다 — barge-in
+- 마이크 버튼을 누르고 말하면(또는 타이핑하면) 말하던 AI가 **발화를 멈추고 양보**한다 (barge-in)
 - 목소리가 대화의 주인공: 자막은 소리에 맞춰 뜨고, 다음 발화는 재생이 끝나야 나온다
 
 실제 대화 한 토막:
@@ -26,21 +26,22 @@
 
 | 항목                                   | 수치                                                | 비고                                          |
 | -------------------------------------- | --------------------------------------------------- | --------------------------------------------- |
-| AI 발화 간 체감 지연                   | **평균 2.1s** (prefetch 도입 전 ~8s)                | [실측 기록](docs/experiments/latency.md)      |
+| AI 발화 간 체감 지연                   | **평균 2.1s** (로컬 n=3, 도입 전 약 8s)             | [실측 기록](docs/experiments/latency.md)      |
 | 대화 품질 (LLM-as-judge, 5항목 루브릭) | 유저 참여 시나리오 **GO** (컷: 평균 ≥7.0 & 최저 ≥6) | [점수 추이](docs/experiments/judge-scores.md) |
 | judge 신뢰성                           | 고정 대화 반복 채점 표준편차 **0**                  | 재현 가능한 평가                              |
-| 테스트                                 | 62 passed                                           | 엔진·평가·WS 프로토콜 배관                    |
+| 테스트                                 | 112 passed (웹 상태 15개 포함)                      | 엔진, 평가, WS 프로토콜, 재시작 경계          |
 
 ## 아키텍처
 
 ```
 [웹 (바닐라 JS)] ── WebSocket ──> [FastAPI]
    자막 동기 재생 · played ack        │
-   push-to-talk 🎤                    ├─ 3자 오케스트레이터 (LangGraph)
-                                      │    supervisor: 맥락 기반 화자 선정 + 발화 의도
-                                      │    barge-in: 스트림 취소 + 끊긴 지점까지 기록
+   push-to-talk                       ├─ 3자 오케스트레이터 (LangGraph)
+                                      │    supervisor v2: 화자, 의도, 대사 통합 생성 + 규칙 가드
+                                      │    barge-in: 실시간 생성은 취소, 준비된 음성은 브라우저에서 중단
                                       │    prefetch: 재생 중 다음 턴 미리 생성·합성
-                                      ├─ STT (whisper) · LLM (스트리밍) · TTS (ElevenLabs v3)
+                                      ├─ STT (gpt-4o-mini-transcribe)
+                                      ├─ LLM (스트리밍) / 문장 단위 TTS (ElevenLabs v3)
                                       └─ 평가: LLM-as-judge + 시나리오 셋 + Langfuse
 ```
 
@@ -66,6 +67,24 @@ LLM-as-judge를 두고, 끼어들기·화제전환·침묵·소외 시나리오 
 끊긴 발화가 judge에 전달되지 않아 barge-in 점수가 무효였던 것을 발견해
 정정·재구현·재측정한 기록을 [experiments](docs/experiments/)에 남겼습니다.
 
+## 끼어들기 지연 기록
+
+`server/.env`에 `BANTER_EVENT_LOG=artifacts/runs/dev.jsonl`을 설정하면 대화 원문 없이
+hold 수신, 브라우저 재생 중단, 생성 취소 완료, 다음 AI 응답 시작 이벤트가 기록됩니다.
+말하기를 취소하거나 STT가 실패한 경우도 별도 종료 결과로 남겨 정상 누락과 구분합니다.
+세션이 끝난 뒤 아래 명령으로 hold별 지연과 누락 이벤트를 확인할 수 있습니다.
+
+```bash
+cd server
+PYTHONPATH=. uv run python scripts/summarize_barge_in.py artifacts/runs/dev.jsonl
+```
+
+브라우저는 마이크 버튼을 누른 시점부터 현재 Audio의 pause 적용까지 걸린 시간을 함께 보냅니다.
+`paused` 결과만 재생 중단 지연 분포에 포함하고, 대기열만 비운 경우와 재생할 항목이 없던 경우는
+건수로 분리합니다. 이 값은 실제 스피커 출력이 멎은 시점이 아니라 브라우저에서 pause가 적용된
+시점입니다. 고정 시나리오와 해석 기준은 [push-to-talk 기준 측정](docs/experiments/push-to-talk-baseline.md)에
+정리했습니다. 원본 실행 로그는 Git에서 제외됩니다.
+
 ## 실행
 
 ```bash
@@ -76,7 +95,10 @@ PYTHONPATH=. uv run uvicorn api.main:app --reload
 # http://localhost:8000
 ```
 
-키 없이 구조만 보려면 `api.app:app`(스텁 발화)으로 띄우면 됩니다. 테스트는 `uv run pytest`.
+`ELEVENLABS_API_KEY`를 비우면 AI 음성 출력 없이 실행됩니다. OpenAI 키 없이 구조만 보려면
+`api.app:app`(스텁 발화)으로 띄우면 됩니다. 화면의 `대화 시작`을 누른 뒤 세션이 열리며,
+12턴 종료 후 같은 화면에서 다시 시작할 수 있습니다. 테스트는 `uv run pytest`로 실행하며,
+Node.js가 설치돼 있으면 재생 중단, 빠른 마이크 해제, 재시작 경계 테스트 15개도 함께 확인합니다.
 
 ## 문서
 
@@ -85,10 +107,13 @@ PYTHONPATH=. uv run uvicorn api.main:app --reload
 - [결정 기록](docs/decisions.md) — 아키텍처 선택의 이유들 (D-001~008)
 - [트러블슈팅](docs/troubleshooting.md) — 실사용 문제 → 진단 → 개선 히스토리
 - [실험 기록](docs/experiments/) — 지연 실측, judge 점수 추이, TTS 청음 비교
+- [Push-to-talk 기준 측정](docs/experiments/push-to-talk-baseline.md): VAD 전환 전 비교 기준
 - [Phase 1 계획](docs/phase-1-plan.md) / [실패 기록](docs/failures.md)
 
 ## 로드맵
 
 - [x] Phase 1 — 텍스트 3자 엔진 + 평가 체계
 - [x] Phase 2 — 음성: push-to-talk STT · 2보이스 TTS · 음성 동기 · prefetch
-- [ ] Phase 3 — 전이중(full-duplex): VAD 기반 barge-in, 실시간 오디오 스트림, 데모 영상
+- [x] Phase 3a: 문장 단위 TTS 스트리밍, hold 기반 빠른 barge-in
+- [ ] Phase 3b: 스트리밍 STT + VAD로 push-to-talk 제거
+- [ ] Phase 3c: WebRTC 전이중 오디오, 실제 재생 중단 측정, 데모 영상

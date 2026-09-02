@@ -24,6 +24,8 @@ build/
 # 커버리지·로그
 coverage/
 *.log
+artifacts/runs/
+server/artifacts/runs/
 
 # OS·에디터
 .DS_Store
