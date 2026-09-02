@@ -15,6 +15,15 @@
         max-width: 640px;
       }
       header { padding: 12px 16px; font-weight: 600; border-bottom: 1px solid #8883; }
+      #session-panel {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 10px 16px;
+        border-bottom: 1px solid #8883;
+      }
+      #session-status { margin: 0; font-size: 14px; opacity: 0.75; }
       #log { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 8px; }
       .msg { padding: 8px 12px; border-radius: 12px; max-width: 80%; line-height: 1.4; }
       .user { align-self: flex-end; background: #2563eb; color: #fff; }
@@ -24,21 +33,76 @@
       form { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid #8883; }
       input { flex: 1; padding: 10px; border-radius: 8px; border: 1px solid #8886; font-size: 15px; }
       button { padding: 10px 16px; border: 0; border-radius: 8px; background: #2563eb; color: #fff; font-size: 15px; }
+      button:disabled { cursor: not-allowed; opacity: 0.5; }
+      #session-start { flex: none; }
       #mic { background: #8884; }
       #mic.rec { background: #dc2626; }
     </style>
   </head>
   <body>
-    <header>banter — 도현 · 소은과 수다</header>
+    <header>banter: 도현, 소은과 수다</header>
+    <section id="session-panel" aria-label="대화 상태">
+      <p id="session-status" role="status" aria-live="polite">준비되면 대화를 시작하세요.</p>
+      <button type="button" id="session-start">대화 시작</button>
+    </section>
     <div id="log"></div>
     <form id="form">
-      <button type="button" id="mic" hidden title="누르는 동안 녹음돼요">🎤</button>
-      <input id="msg" autocomplete="off" placeholder="말 걸거나 끼어들어보세요…" />
-      <button>전송</button>
+      <button type="button" id="mic" hidden disabled title="누르는 동안 녹음돼요" aria-label="누르는 동안 녹음" aria-pressed="false">말하기</button>
+      <input id="msg" autocomplete="off" placeholder="대화를 시작해 주세요." disabled />
+      <button id="send" disabled>전송</button>
     </form>
     <script>
       const NAMES = { user: '나', ai_a: '도현', ai_b: '소은' };
       const log = document.getElementById('log');
+      const statusEl = document.getElementById('session-status');
+      const startBtn = document.getElementById('session-start');
+      const form = document.getElementById('form');
+      const input = document.getElementById('msg');
+      const sendBtn = document.getElementById('send');
+      const micBtn = document.getElementById('mic');
+      let ws = null;
+      let sessionState = 'idle';
+      let connectionEpoch = 0;
+      let voiceMode = false;
+      let sttAvailable = false;
+      let current = null;
+      let pendingStt = null;
+      let voiceRequestClientEventId = null;
+      let activeSessionId = null;
+      let clientEventSequence = 0;
+      let activeHoldEventId = null;
+      let suppressAudioUntilNextTurn = false;
+      let audioSuppressionClientEventId = null;
+
+      function setSessionState(next, message) {
+        sessionState = next;
+        statusEl.textContent = message;
+        const running = next === 'running';
+        input.disabled = !running;
+        sendBtn.disabled = !running;
+        micBtn.disabled = !running || !sttAvailable;
+        micBtn.hidden = !running || !sttAvailable;
+        startBtn.disabled = next === 'starting' || running;
+        startBtn.textContent = next === 'ended' || next === 'error' ? '다시 시작' : '대화 시작';
+        input.placeholder = running ? '말 걸거나 끼어들어보세요…' : '대화를 시작해 주세요.';
+        if (running) input.focus();
+      }
+
+      function safeSend(payload, socket = ws) {
+        if (socket && socket.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify(payload));
+          return true;
+        }
+        return false;
+      }
+
+      function clearVoiceRequest(clientEventId = null) {
+        if (clientEventId && voiceRequestClientEventId !== clientEventId) return false;
+        if (pendingStt) pendingStt.wrap.remove();
+        pendingStt = null;
+        voiceRequestClientEventId = null;
+        return true;
+      }
 
       function add(speaker, text) {
         const wrap = document.createElement('div');
@@ -71,29 +135,32 @@
       const player = new Audio();
       const audioQueue = [];
       let playing = false;
+      let playbackStarted = false;
       let unlocked = false;
       player.onended = () => playNext();
       player.onerror = () => playNext();
 
-      // 첫 사용자 제스처(아무 곳 탭/키)에서 오디오 재생 권한을 확보한다 —
-      // 라디오는 유저 입력 전에 시작되므로 '전송' 버튼만으로는 청취 전용 유저가 무음이 된다.
-      function unlockAudio() {
-        if (unlocked) return;
-        unlocked = true;
-        hideSoundHint();
+      // 시작 버튼의 사용자 제스처 안에서 오디오 재생 권한을 먼저 확보한다.
+      async function unlockAudio() {
+        if (unlocked) return true;
         player.src = SILENT_WAV;
-        player.play().catch(() => {});
-        if (!playing) playNext(); // 차단으로 되돌려둔 항목이 있으면 재개
+        try {
+          await player.play();
+          player.pause();
+          unlocked = true;
+          hideSoundHint();
+          return true;
+        } catch (_) {
+          return false;
+        }
       }
-      document.addEventListener('pointerdown', unlockAudio, { once: true });
-      document.addEventListener('keydown', unlockAudio, { once: true });
 
       function showSoundHint() {
         let el = document.getElementById('soundhint');
         if (!el) {
           el = document.createElement('div');
           el.id = 'soundhint';
-          el.textContent = '🔈 화면을 한 번 탭하면 목소리가 재생돼요';
+          el.textContent = '화면을 한 번 탭하면 목소리가 재생돼요';
           el.style.cssText = 'position:fixed;top:8px;left:50%;transform:translateX(-50%);background:#2563eb;color:#fff;padding:8px 14px;border-radius:8px;font-size:13px;z-index:9';
           document.body.append(el);
         }
@@ -110,19 +177,27 @@
       let flushUpTo = 0; // 서버 flush 지시: 이 seq 이하 오디오는 stale — 표시 없이 ack만
       let currentItem = null; // 재생 중 항목 (중단 시 ack용)
       function enqueuePresentation(item) {
+        if (suppressAudioUntilNextTurn) { ack(item.seq); return; }
         if (item.seq <= flushUpTo) { ack(item.seq); return; } // 유저 발화 이전 대사 — 폐기
         audioQueue.push(item); // {seq, speaker, text, audio|null}
         if (!playing) playNext();
       }
       function playNext() {
         currentItem = null;
+        playbackStarted = false;
         if (!audioQueue.length) { playing = false; return; }
         playing = true;
         const item = audioQueue.shift();
         if (item.seq <= flushUpTo) { ack(item.seq); playNext(); return; }
         currentItem = item;
         const gen = generation;
-        const finish = () => { if (gen !== generation) return; ack(item.seq); playNext(); };
+        let finished = false;
+        const finish = () => {
+          if (gen !== generation || finished) return;
+          finished = true;
+          ack(item.seq);
+          playNext();
+        };
         if (!item.audio) { // 합성 실패 → 자막만 표시하고 즉시 다음
           showSentence(item);
           finish();
@@ -132,8 +207,11 @@
         player.onended = finish;
         player.onerror = finish;
         player.play().then(() => {
+          if (gen !== generation || finished) return;
+          playbackStarted = true;
           showSentence(item); // 재생 성공 순간 자막 표시 (문장 단위)
         }).catch((err) => {
+          if (gen !== generation || finished) return;
           if (err && err.name === 'NotAllowedError' && !unlocked) {
             // 아직 제스처 전 — 항목을 되돌리고 안내. ack하지 않는다(서버가 기다려줌)
             audioQueue.unshift(item);
@@ -146,29 +224,85 @@
         });
       }
       function ack(seq) {
-        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'played', seq }));
+        safeSend({ type: 'played', seq });
       }
-      // 클라이언트 barge — 유저가 입력하는 순간 재생 중인 목소리를 끊고 큐를 비운다.
-      // 버린 항목 중 최고 seq 하나만 ack하면 된다 (서버 장부가 max 기반이라).
-      function stopAudio() {
+      // 사용자가 끼어든 시점부터 브라우저 pause 적용까지의 지연을 함께 반환한다.
+      // paused 외 결과는 실제 재생 중단 지연 표본에 포함하지 않는다.
+      function stopAudio(measurementStartedAt = null, acknowledge = true) {
         generation += 1; // 재생 중이던 항목의 늦은 콜백(ended/catch) 무효화
+        const interruptedItem = currentItem;
+        const hadQueuedAudio = Boolean(currentItem || audioQueue.length);
+        const wasAudible = Boolean(playing && currentItem && playbackStarted && !player.paused);
+        let outcome = hadQueuedAudio ? 'queued_only' : 'idle';
+        let stoppedAt;
+        if (wasAudible) {
+          try {
+            player.pause();
+            outcome = player.paused ? 'paused' : 'pause_failed';
+          } catch (_) {
+            outcome = 'pause_failed';
+          }
+          stoppedAt = performance.now();
+        } else {
+          if (playing) {
+            try { player.pause(); } catch (_) {}
+          }
+          stoppedAt = performance.now();
+        }
+
         let maxSeq = currentItem ? (currentItem.seq || 0) : 0;
         while (audioQueue.length) maxSeq = Math.max(maxSeq, audioQueue.shift().seq || 0);
-        if (playing) player.pause();
         playing = false;
+        playbackStarted = false;
         currentItem = null;
-        if (maxSeq > 0) ack(maxSeq); // 서버 장부가 max 기반이라 최고 seq 하나로 충분
+        if (acknowledge && maxSeq > 0) ack(maxSeq); // 서버 장부는 최고 seq 하나면 충분하다.
+
+        const startedAt = Number.isFinite(measurementStartedAt) ? measurementStartedAt : stoppedAt;
+        const audioStop = {
+          outcome,
+          elapsed_ms: Math.round(Math.max(0, stoppedAt - startedAt) * 1000) / 1000,
+        };
+        if (interruptedItem && interruptedItem.seq) {
+          audioStop.segment_id = 'audio-' + interruptedItem.seq;
+        }
+        return { audioStop, maxSeq };
       }
 
-      const ws = new WebSocket('ws://' + location.host + '/ws');
-      let voiceMode = false;
-      let current = null; // (텍스트 모드) 스트리밍 중인 AI 발화 버블
+      function resetPresentation(clearLog) {
+        cleanupRecording();
+        generation += 1;
+        player.pause();
+        player.removeAttribute('src');
+        player.load();
+        audioQueue.length = 0;
+        playing = false;
+        playbackStarted = false;
+        currentItem = null;
+        flushUpTo = 0;
+        current = null;
+        lastAi = null;
+        activeSessionId = null;
+        clientEventSequence = 0;
+        activeHoldEventId = null;
+        suppressAudioUntilNextTurn = false;
+        audioSuppressionClientEventId = null;
+        if (pendingStt) pendingStt.wrap.remove();
+        pendingStt = null;
+        if (clearLog) log.replaceChildren();
+      }
 
-      ws.onmessage = (e) => {
-        const d = JSON.parse(e.data);
+      function handleMessage(d, socket, epoch) {
+        if (socket !== ws || epoch !== connectionEpoch) return;
         if (d.type === 'hello') {
           voiceMode = d.voice; // 음성 모드면 토큰 라이브 표시 대신 오디오 동기 표시
-          if (d.stt) document.getElementById('mic').hidden = false; // 🎤 push-to-talk
+          sttAvailable = d.stt;
+          setSessionState('starting', '세션을 준비하고 있어요…');
+          safeSend({ type: 'session_start' }, socket);
+        } else if (d.type === 'session_started') {
+          activeSessionId = String(d.session_id || ('connection-' + epoch));
+          clientEventSequence = 0;
+          activeHoldEventId = null;
+          setSessionState('running', '대화 중, 언제든 끼어들 수 있어요.');
         } else if (d.type === 'you') {
           if (pendingStt) { // '듣는 중…' 자리에 전사 결과 채움
             pendingStt.body.textContent = d.text;
@@ -176,7 +310,23 @@
           } else {
             add('user', d.text);
           }
+          voiceRequestClientEventId = null;
         } else if (d.type === 'start') {
+          if (d.after_client_event_id === voiceRequestClientEventId) {
+            clearVoiceRequest(voiceRequestClientEventId);
+          }
+          const mayResumeAudio = !suppressAudioUntilNextTurn
+            || audioSuppressionClientEventId === null
+            || d.after_client_event_id === audioSuppressionClientEventId;
+          if (!mayResumeAudio) {
+            current = null;
+            return;
+          }
+          if (suppressAudioUntilNextTurn) {
+            suppressAudioUntilNextTurn = false;
+            audioSuppressionClientEventId = null;
+          }
+          if (voiceRequestClientEventId) clearVoiceRequest();
           current = voiceMode ? null : add(d.speaker, '');
         } else if (d.type === 'token') {
           if (current) current.body.textContent += d.text;
@@ -200,80 +350,233 @@
           if (current) current.wrap.remove(); // 실패한 턴의 빈 버블 제거
           current = null;
         } else if (d.type === 'done') {
-          sessionEnded = true;
-          endSession('세션이 마무리됐어요. 새로고침하면 다시 시작해요.');
+          // done은 합성과 전송이 끝났다는 뜻이며 브라우저 재생 완료는 아니다.
+          // 마지막 음성을 자르지 않고, 다시 시작할 때만 오디오를 정리한다.
+          cleanupRecording();
+          setSessionState('ended', '대화가 끝났어요. 같은 화면에서 다시 시작할 수 있어요.');
+          startBtn.focus();
+          socket.close(1000);
         }
-      };
-
-      let sessionEnded = false; // done 후의 onclose가 안내 문구를 덮지 않게
-      function endSession(text) {
-        const input = document.getElementById('msg');
-        input.disabled = true;
-        input.placeholder = text;
       }
 
-      ws.onclose = () => { if (!sessionEnded) endSession('연결이 끊겼어요. 새로고침하면 다시 시작해요.'); };
-      ws.onerror = () => { if (!sessionEnded) endSession('연결 오류가 났어요. 새로고침하면 다시 시작해요.'); };
+      async function startSession() {
+        if (!['idle', 'ended', 'error'].includes(sessionState)) return;
+        const epoch = ++connectionEpoch;
+        const previous = ws;
+        ws = null;
+        if (previous && previous.readyState < WebSocket.CLOSING) previous.close(1000);
+        resetPresentation(true);
+        sttAvailable = false;
+        voiceMode = false;
+        setSessionState('starting', '오디오를 준비하고 있어요…');
 
-      // 🎤 push-to-talk: 누르는 동안 녹음 → 떼면 서버로 전송 → STT → 대화 합류
-      const micBtn = document.getElementById('mic');
+        if (!(await unlockAudio())) {
+          if (epoch === connectionEpoch) {
+            setSessionState('error', '오디오를 시작하지 못했어요. 다시 시도해 주세요.');
+          }
+          return;
+        }
+        if (epoch !== connectionEpoch) return;
+
+        const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const socket = new WebSocket(scheme + '//' + location.host + '/ws');
+        ws = socket;
+        socket.onopen = () => {
+          if (socket === ws && epoch === connectionEpoch) {
+            setSessionState('starting', '서버에 연결하고 있어요…');
+          }
+        };
+        socket.onmessage = (event) => {
+          if (socket !== ws || epoch !== connectionEpoch) return;
+          try {
+            handleMessage(JSON.parse(event.data), socket, epoch);
+          } catch (_) {
+            socket.close(1002);
+            setSessionState('error', '서버 메시지를 처리하지 못했어요. 다시 시도해 주세요.');
+          }
+        };
+        socket.onerror = () => {};
+        socket.onclose = () => {
+          if (socket !== ws || epoch !== connectionEpoch) return;
+          ws = null;
+          if (sessionState === 'ended') return;
+          resetPresentation(false);
+          setSessionState('error', '연결이 끊겼어요. 다시 시작해 주세요.');
+        };
+      }
+
+      startBtn.addEventListener('click', startSession);
+
+      // push-to-talk는 누르는 동안 녹음하고 버튼을 놓으면 STT로 보낸다.
       let recorder = null;
-      let chunks = [];
-      let pendingStt = null; // 전사 대기 중인 '🎤 …' 말풍선
+      let activeStream = null;
+      let recordingRequest = 0;
+      let pressHeld = false;
+
+      function releaseHold(clientEventId, socket = ws) {
+        if (!clientEventId || activeHoldEventId !== clientEventId) return false;
+        activeHoldEventId = null;
+        return safeSend({ type: 'hold_off', client_event_id: clientEventId }, socket);
+      }
+
+      function nextClientEventId() {
+        const sessionId = activeSessionId || ('connection-' + connectionEpoch);
+        return sessionId + '-' + (++clientEventSequence);
+      }
+
+      function cleanupRecording() {
+        pressHeld = false;
+        recordingRequest += 1;
+        activeHoldEventId = null;
+        if (recorder) {
+          recorder.ondataavailable = null;
+          recorder.onstop = null;
+          if (recorder.state === 'recording') recorder.stop();
+          recorder = null;
+        }
+        if (activeStream) {
+          activeStream.getTracks().forEach((track) => track.stop());
+          activeStream = null;
+        }
+        micBtn.classList.remove('rec');
+        micBtn.setAttribute('aria-pressed', 'false');
+        clearVoiceRequest();
+      }
+
       async function startRec() {
-        stopAudio(); // 말하려는 순간 AI 목소리를 끊는다 (barge)
-        unlockAudio();
-        // 🎤 누르는 즉시 발화권 잡기 — 서버가 진행 중 발화를 끊고 새 턴을 열지 않는다
-        ws.send(JSON.stringify({ type: 'hold' }));
+        if (sessionState !== 'running' || !ws || ws.readyState !== WebSocket.OPEN) return;
+        if (voiceRequestClientEventId || pressHeld
+          || (recorder && recorder.state === 'recording')) return;
+        const gestureStartedAt = performance.now();
+        pressHeld = true;
+        const request = ++recordingRequest;
+        const epoch = connectionEpoch;
+        const socket = ws;
+        const clientEventId = nextClientEventId();
+        activeHoldEventId = clientEventId;
+        suppressAudioUntilNextTurn = true;
+        audioSuppressionClientEventId = clientEventId;
+        const stopped = stopAudio(gestureStartedAt, false);
+        safeSend({
+          type: 'hold',
+          client_event_id: clientEventId,
+          audio_stop: stopped.audioStop,
+        }, socket);
+        if (stopped.maxSeq > 0) ack(stopped.maxSeq);
         try {
           const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-          chunks = [];
-          recorder = new MediaRecorder(stream, { audioBitsPerSecond: 128000 }); // 전사 정확도용 비트레이트
-          recorder.ondataavailable = (e) => chunks.push(e.data);
-          recorder.onstop = async () => {
+          const stale = request !== recordingRequest || epoch !== connectionEpoch
+            || socket !== ws || sessionState !== 'running' || !pressHeld;
+          if (stale) {
             stream.getTracks().forEach((t) => t.stop());
-            const blob = new Blob(chunks, { type: recorder.mimeType });
+            return;
+          }
+
+          activeStream = stream;
+          const mediaRecorder = new MediaRecorder(stream, { audioBitsPerSecond: 128000 });
+          const chunks = [];
+          recorder = mediaRecorder;
+          mediaRecorder.ondataavailable = (event) => chunks.push(event.data);
+          mediaRecorder.onstop = async () => {
+            pressHeld = false;
+            stream.getTracks().forEach((track) => track.stop());
+            if (activeStream === stream) activeStream = null;
+            if (recorder === mediaRecorder) recorder = null;
+            micBtn.classList.remove('rec');
+            micBtn.setAttribute('aria-pressed', 'false');
+            if (request !== recordingRequest || epoch !== connectionEpoch
+              || socket !== ws || sessionState !== 'running') return;
+
+            const blob = new Blob(chunks, { type: mediaRecorder.mimeType });
             if (blob.size < 8000) { // 스치듯 눌린 짧은 녹음 — 발화권 반납
-              ws.send(JSON.stringify({ type: 'hold_off' }));
+              releaseHold(clientEventId, socket);
               return;
             }
             // 전사되는 동안의 무반응 공백을 없앤다 — 즉시 자리 표시
-            pendingStt = add('user', '🎤 …');
+            pendingStt = add('user', '듣는 중...');
+            voiceRequestClientEventId = clientEventId;
             const placed = pendingStt;
             setTimeout(() => { if (pendingStt === placed) { placed.wrap.remove(); pendingStt = null; } }, 10000);
-            const b64 = await new Promise((res) => {
-              const r = new FileReader();
-              r.onload = () => res(r.result.split(',')[1]);
-              r.readAsDataURL(blob);
-            });
-            ws.send(JSON.stringify({ type: 'voice', audio: b64, mime: recorder.mimeType }));
+            let b64;
+            try {
+              b64 = await new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = () => resolve(reader.result.split(',')[1]);
+                reader.onerror = () => reject(new Error('audio read failed'));
+                reader.onabort = () => reject(new Error('audio read aborted'));
+                reader.readAsDataURL(blob);
+              });
+            } catch (_) {
+              if (pendingStt === placed) clearVoiceRequest(clientEventId);
+              if (request === recordingRequest && epoch === connectionEpoch
+                && socket === ws && sessionState === 'running') {
+                releaseHold(clientEventId, socket);
+              }
+              return;
+            }
+            if (request === recordingRequest && epoch === connectionEpoch
+              && socket === ws && sessionState === 'running') {
+              const sent = safeSend({
+                type: 'voice',
+                client_event_id: clientEventId,
+                audio: b64,
+                mime: mediaRecorder.mimeType,
+              }, socket);
+              if (sent && activeHoldEventId === clientEventId) {
+                activeHoldEventId = null;
+              } else if (!sent) {
+                clearVoiceRequest(clientEventId);
+              }
+            } else if (pendingStt === placed) {
+              clearVoiceRequest(clientEventId);
+            }
           };
-          recorder.start();
+          mediaRecorder.start();
           micBtn.classList.add('rec');
+          micBtn.setAttribute('aria-pressed', 'true');
         } catch (e) {
-          ws.send(JSON.stringify({ type: 'hold_off' })); // 권한 실패 — 발화권 반납
-          alert('마이크 권한이 필요해요');
+          if (request === recordingRequest && socket === ws) {
+            releaseHold(clientEventId, socket);
+            cleanupRecording();
+            statusEl.textContent = '마이크 권한이 필요해요. 텍스트로도 참여할 수 있어요.';
+          }
         }
       }
       function stopRec() {
-        if (recorder && recorder.state === 'recording') recorder.stop();
+        if (!pressHeld && (!recorder || recorder.state !== 'recording')) return;
+        pressHeld = false;
+        if (recorder && recorder.state === 'recording') {
+          recorder.stop();
+        } else {
+          releaseHold(activeHoldEventId);
+        }
         micBtn.classList.remove('rec');
+        micBtn.setAttribute('aria-pressed', 'false');
       }
       micBtn.onpointerdown = startRec;
       micBtn.onpointerup = stopRec;
       micBtn.onpointerleave = stopRec;
+      micBtn.onpointercancel = stopRec;
 
-      document.getElementById('form').onsubmit = (e) => {
+      form.onsubmit = (e) => {
         e.preventDefault();
-        const input = document.getElementById('msg');
+        if (sessionState !== 'running' || !ws || ws.readyState !== WebSocket.OPEN) return;
         const v = input.value.trim();
         if (!v) return;
+        if (activeHoldEventId) {
+          releaseHold(activeHoldEventId);
+          cleanupRecording();
+        }
+        const clientEventId = nextClientEventId();
+        suppressAudioUntilNextTurn = true;
+        audioSuppressionClientEventId = clientEventId;
         stopAudio(); // 끼어드는 순간 AI 목소리를 즉시 끊는다 (클라이언트 barge)
-        unlockAudio(); // 첫 제스처에서 오디오 재생 권한 확보 (stop 뒤에 — unlock 재생을 끊지 않게)
         add('user', v); // 내 발화는 로컬에서 바로 표시
-        ws.send(JSON.stringify({ type: 'say', text: v }));
+        safeSend({ type: 'say', text: v, client_event_id: clientEventId });
         input.value = '';
       };
+
+      setSessionState('idle', '준비되면 대화를 시작하세요.');
     </script>
   </body>
 </html>
