@@ -1,21 +1,47 @@
-# server — banter 백엔드
+# Banter 서버
 
-파이썬 단독 (FastAPI + LangGraph). 패키지 관리는 `uv`.
+FastAPI가 HTTP와 WebSocket 연결을 제공하고, asyncio 작업이 입력 수신, 응답 생성과 음성
+합성을 제어한다. LangGraph는 공통 대화 로직을 사용하는 평가 시나리오에 쓰인다.
+현재 구조와 검증 범위는 [프로젝트 README](../README.md)에 있다.
 
-## 구조
-- `api/` — 세션·대화기록·설정 REST/WS (FastAPI)
-- `engine/` — 3자 오케스트레이터
-  - `graph/` — LangGraph 상태·노드 (엔진설계 §1.1~1.2), 화자 선정 v1 + 규칙 가드 (§1.3)
-  - `personas/` — 페르소나 설정, 데이터 주도 (D-004/D-007)
-  - `eval/` — judge 루브릭·시나리오·채점 하네스 (D-005, §4.1)
+## 코드 탐색
 
-## 경계 원칙
-`api`는 `engine`을 경계 인터페이스로 호출한다. Phase 3에서 `engine`이 LiveKit agent worker로 물리 분리되므로(PRD §6.2), 지금부터 결합을 최소화한다.
+| 경로 | 현재 역할 |
+| --- | --- |
+| [api/app.py](api/app.py) | 앱 생성, WebSocket 세션, 발화권, 생성 취소, 문장별 합성과 재생 확인 |
+| [api/main.py](api/main.py) | 실제 공급자 주입과 STT 및 VAD 설정을 사용하는 실행 진입점 |
+| [api/stt_stream.py](api/stt_stream.py) | 발화별 순차 음성 전송, 제한된 대기열과 취소 |
+| [api/event_log.py](api/event_log.py) | 끼어들기, 전사와 복구 시점의 JSONL 기록 |
+| [engine/graph/](engine/graph) | 대화 상태, 화자 규칙, 프롬프트, 후처리와 평가용 그래프 |
+| [engine/personas/](engine/personas) | 두 페르소나의 말투, 성향과 목소리 설정 |
+| [engine/eval/](engine/eval) | 시나리오 평가, judge, 추적과 공급자 어댑터 |
+| [tests/](tests) | 가짜 공급자와 제어된 이벤트를 사용하는 회귀 테스트 |
 
-## 개발 (Phase 1)
+실시간 API는 평가 그래프를 실행하지 않고 공통 함수를 직접 조합한다. `create_app`에 공급자를
+주입하므로 외부 호출 없이 완료 순서, 오류와 늦은 응답을 제어할 수 있다. 공급자 어댑터는
+현재 `engine/eval` 아래에 있지만 API에서도 사용한다.
+
+## 실행과 확인
+
+Python 3.13 이상과 uv를 사용한다. 아래 명령은 `server` 디렉터리에서 실행한다.
+
 ```bash
-uv sync        # 의존성 설치 (A단계에서 fastapi·langgraph 등 추가 후)
-uv run ...     # 실행 커맨드는 착수 후 확정
+uv sync --locked
+PYTHONPATH=. uv run uvicorn api.app:app --reload
 ```
 
-설계 문서: [PRD](../docs/prd-v0.1.md) · [엔진 설계](../docs/engine-design-v0.1.md) · [Phase 1 계획](../docs/phase-1-plan.md)
+`http://localhost:8000`에서 고정 스텁 대사로 화면과 연결을 확인한다. 이 진입점은 실제
+LLM, STT와 TTS를 호출하지 않는다. 실제 음성 실행과 자동 테스트 명령은
+[프로젝트 실행 안내](../README.md#실행)를 따른다. 실제 공급자를 사용하는 `api.main:app`은
+키, 결제 상태, 지출 상한과 호출 범위를 먼저 확인해야 한다.
+
+## 구조의 한계
+
+현재 `api/app.py`에 연결 처리와 여러 대화 상태의 제어가 집중돼 있다. 미완료 사전 생성
+대기의 입력 지연은 수정했으며, [별도 회귀](tests/test_prefetch.py)로 입력과 완료의 경합 및
+취소를 확인한다. 이 회귀를 유지하며 세션 제어의 책임을 정리하는 것이 다음 범위다.
+[재현과 후속 계획](../docs/phase-3-plan.md#다음-개발-범위)
+
+대화 상태는 메모리에 보관하며 서버 재시작 후 세션 복원을 제공하지 않는다. WebRTC나
+LiveKit 전환은 필수 단계가 아니며, 전송 지연, 지터나 에코가 실제 병목일 때 검토한다.
+선택 이유와 대안은 [설계 결정](../docs/decisions.md)에 있다.
