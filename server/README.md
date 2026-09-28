@@ -11,6 +11,7 @@ FastAPI가 HTTP와 WebSocket 연결을 제공하고, asyncio 작업이 입력 �
 | [api/app.py](api/app.py) | 앱 생성, WebSocket 세션, 발화권, 생성 취소, 문장별 합성과 재생 확인 |
 | [api/main.py](api/main.py) | 실제 공급자 주입과 STT 및 VAD 설정을 사용하는 실행 진입점 |
 | [api/stt_stream.py](api/stt_stream.py) | 발화별 순차 음성 전송, 제한된 대기열과 취소 |
+| [api/playback_history.py](api/playback_history.py) | 음성 순번과 발화 연결, 재생 중단 표시와 이력 버전 관리 |
 | [api/event_log.py](api/event_log.py) | 끼어들기, 전사와 복구 시점의 JSONL 기록 |
 | [engine/graph/](engine/graph) | 대화 상태, 화자 규칙, 프롬프트, 후처리와 평가용 그래프 |
 | [engine/personas/](engine/personas) | 두 페르소나의 말투, 성향과 목소리 설정 |
@@ -34,6 +35,20 @@ PYTHONPATH=. uv run uvicorn api.app:app --reload
 LLM, STT와 TTS를 호출하지 않는다. 실제 음성 실행과 자동 테스트 명령은
 [프로젝트 실행 안내](../README.md#실행)를 따른다. 실제 공급자를 사용하는 `api.main:app`은
 키, 결제 상태, 지출 상한과 호출 범위를 먼저 확인해야 한다.
+
+## 전사 연결 점검
+
+AI 대화 전체를 실행하지 않고 `gpt-live-transcribe` 연결과 세션 설정만 확인하는 명령.
+기본 실행은 안내만 출력하며 키 파일 접근과 API 호출 없음.
+
+```bash
+PYTHONPATH=. uv run python scripts/check_stt_connection.py
+```
+
+결제 상태와 지출 상한 확인 후 같은 명령에 `--live`를 붙여 실제 연결 1회 실행.
+기존 환경변수 또는 `server/.env`의 OpenAI 키 사용. 음성 전송, commit, LLM, TTS 호출 없음.
+연결 대기 10초, 세션 및 SDK 정리 5초 예산. 키와 원문 오류를 제외한 진단 정보만 출력.
+연결 성공은 실제 음성 전사와 대화 복구 검증을 대체하지 않음. 현재 원격 실행은 미실시.
 
 ## 구조의 한계
 
