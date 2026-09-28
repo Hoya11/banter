@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import json
 from collections import Counter
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from enum import StrEnum
 from math import floor, isfinite
 from pathlib import Path
 from threading import Lock
 from time import monotonic
-from typing import Callable, Mapping, Sequence
-
 
 MetadataScalar = str | int | float | bool
 
@@ -30,6 +29,16 @@ METADATA_FIELDS = frozenset(
         'utterance_model',
         'supervisor_model',
         'stt_model',
+        'stt_file_model',
+        'stt_stream_encoding',
+        'stt_stream_sample_rate_hz',
+        'stt_stream_chunk_samples',
+        'stt_delay',
+        'stt_chunk_count',
+        'stt_audio_samples',
+        'stt_audio_duration_ms',
+        'stt_audio_bytes',
+        'audio_uplink',
         'tts_model',
         'protocol_version',
         'voice_mode',
@@ -37,6 +46,11 @@ METADATA_FIELDS = frozenset(
         'ack_sec',
         'max_turns',
         'unified',
+        'vad_engine',
+        'vad_start_ms',
+        'vad_end_silence_ms',
+        'vad_pre_roll_ms',
+        'vad_max_utterance_ms',
     }
 )
 
@@ -71,6 +85,14 @@ class EventName(StrEnum):
     LATE_AUDIO_DROPPED = 'late_audio_dropped'
     PLAYBACK_ACK = 'playback_ack'
     NEXT_TURN_STARTED = 'next_turn_started'
+    STT_STREAM_STARTED = 'stt_stream_started'
+    STT_PROVIDER_READY = 'stt_provider_ready'
+    STT_FIRST_DELTA = 'stt_first_delta'
+    STT_INPUT_COMMITTED = 'stt_input_committed'
+    STT_COMPLETED = 'stt_completed'
+    STT_CLIENT_OBSERVED = 'stt_client_observed'
+    VAD_SPEECH_STARTED = 'vad_speech_started'
+    VAD_SPEECH_ENDED = 'vad_speech_ended'
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +135,45 @@ class HoldLatencySample:
     client_event_id: str | None = None
     audio_stop_outcome: str | None = None
     pointer_to_audio_stop_ms: float | None = None
+    interaction_mode: str = 'push_to_talk'
+    vad_start_to_audio_stop_ms: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SttLatencySample:
+    run_id: str
+    session_id: str
+    client_event_id: str
+    stt_mode: str
+    outcome: str | None
+    stream_to_provider_ready_ms: float | None
+    stream_to_first_delta_ms: float | None
+    input_to_completed_ms: float | None
+    release_to_final_ms: float | None
+    missing: tuple[str, ...]
+    interaction_mode: str = 'push_to_talk'
+    vad_end_to_final_ms: float | None = None
+    vad_start_observed: bool = False
+    vad_end_observed: bool = False
+
+
+@dataclass(slots=True)
+class _PendingStt:
+    index: int
+    run_id: str
+    session_id: str
+    client_event_id: str
+    stt_mode: str
+    stream_started_ms: float | None = None
+    provider_ready_ms: float | None = None
+    first_delta_ms: float | None = None
+    input_committed_ms: float | None = None
+    completed_ms: float | None = None
+    outcome: str | None = None
+    release_to_final_ms: float | None = None
+    interaction_mode: str = 'push_to_talk'
+    vad_start_observed: bool = False
+    vad_end_observed: bool = False
 
 
 @dataclass(slots=True)
@@ -128,6 +189,7 @@ class _PendingHold:
     cancellation_ms: float | None = None
     audio_stop_outcome: str | None = None
     client_elapsed_ms: float | None = None
+    interaction_mode: str = 'push_to_talk'
 
 
 class JsonlEventRecorder:
@@ -225,6 +287,13 @@ def _finish_sample(pending: _PendingHold) -> HoldLatencySample:
         pointer_to_audio_stop_ms=(
             pending.client_elapsed_ms
             if pending.audio_stop_outcome == 'paused'
+            and pending.interaction_mode == 'push_to_talk'
+            else None
+        ),
+        interaction_mode=pending.interaction_mode,
+        vad_start_to_audio_stop_ms=(
+            pending.client_elapsed_ms
+            if pending.audio_stop_outcome == 'paused' and pending.interaction_mode == 'vad'
             else None
         ),
     )
@@ -239,6 +308,7 @@ def summarize_hold_latencies(path: str | Path) -> list[HoldLatencySample]:
     필요한 hold의 종료 이벤트는 generation 무효화보다 이를 수 없다.
     """
     relevant = {
+        EventName.SESSION_STARTED.value,
         EventName.HOLD_RECEIVED.value,
         EventName.HOLD_CANCELLED.value,
         EventName.GENERATION_INVALIDATED.value,
@@ -249,6 +319,7 @@ def summarize_hold_latencies(path: str | Path) -> list[HoldLatencySample]:
     replaced_terminal_generations: set[tuple[str, str, str]] = set()
     finished_by_index: dict[int, HoldLatencySample] = {}
     hold_count = 0
+    session_interactions: dict[tuple[str, str], str] = {}
 
     def finish(pending: _PendingHold) -> None:
         finished_by_index[pending.index] = _finish_sample(pending)
@@ -284,6 +355,12 @@ def summarize_hold_latencies(path: str | Path) -> list[HoldLatencySample]:
             timestamp = float(timestamp)
             key = (run_id, session_id)
 
+            if event == EventName.SESSION_STARTED.value:
+                metadata = data.get('metadata')
+                if isinstance(metadata, dict):
+                    session_interactions[key] = metadata.get('interaction_mode', 'push_to_talk')
+                continue
+
             if event == EventName.HOLD_RECEIVED.value:
                 previous = pending_by_session.pop(key, None)
                 if previous is not None:
@@ -315,6 +392,7 @@ def summarize_hold_latencies(path: str | Path) -> list[HoldLatencySample]:
                     generation_id=generation_id,
                     hold_monotonic_ms=timestamp,
                     client_event_id=client_event_id,
+                    interaction_mode=session_interactions.get(key, 'push_to_talk'),
                 )
                 hold_count += 1
                 continue
@@ -457,12 +535,22 @@ def _latency_distribution(values: Sequence[float]) -> dict[str, int | float | No
     }
 
 
+def _stt_values(
+    samples: Sequence[SttLatencySample],
+    field: str,
+) -> list[float]:
+    return [
+        value
+        for sample in samples
+        if (value := getattr(sample, field)) is not None
+    ]
+
+
 def build_hold_report(samples: Sequence[HoldLatencySample]) -> dict[str, object]:
     """hold 결과와 지연 분포를 포트폴리오 기준선용 요약으로 만든다.
 
-    실제 재생 중단 지연으로 해석할 수 있는 `paused` 결과만
-    pointer_to_audio_stop_ms 분포에 포함한다. 다른 outcome은 정상적인 제외
-    사례로 건수만 남긴다.
+    실제 재생 중단 지연으로 해석할 수 있는 `paused` 결과만 입력 방식에 맞는
+    지연 분포에 포함한다. 다른 outcome은 정상적인 제외 사례로 건수만 남긴다.
     """
     outcomes = Counter(
         sample.audio_stop_outcome
@@ -473,6 +561,7 @@ def build_hold_report(samples: Sequence[HoldLatencySample]) -> dict[str, object]
         sample.pointer_to_audio_stop_ms
         for sample in samples
         if sample.audio_stop_outcome == 'paused'
+        and sample.interaction_mode == 'push_to_talk'
         and sample.pointer_to_audio_stop_ms is not None
     ]
     missing_events = Counter(
@@ -491,6 +580,12 @@ def build_hold_report(samples: Sequence[HoldLatencySample]) -> dict[str, object]
         'audio_stop_outcomes': dict(sorted(outcomes.items())),
         'missing_events': dict(sorted(missing_events.items())),
         'pointer_to_audio_stop_ms': _latency_distribution(paused),
+        'vad_start_to_audio_stop_ms': _latency_distribution(
+            present('vad_start_to_audio_stop_ms')
+        ),
+        'interaction_modes': dict(sorted(Counter(
+            sample.interaction_mode for sample in samples
+        ).items())),
         'hold_to_invalidation_ms': _latency_distribution(
             present('hold_to_invalidation_ms')
         ),
@@ -498,4 +593,282 @@ def build_hold_report(samples: Sequence[HoldLatencySample]) -> dict[str, object]
         'hold_to_cancellation_ms': _latency_distribution(
             present('hold_to_cancellation_ms')
         ),
+    }
+
+
+def summarize_stt_latencies(path: str | Path) -> list[SttLatencySample]:
+    """JSONL에서 STT 방식별 지연을 대화 원문 없이 복원한다."""
+    session_modes: dict[tuple[str, str], str] = {}
+    session_interactions: dict[tuple[str, str], str] = {}
+    pending: dict[tuple[str, str, str], _PendingStt] = {}
+    ordered_keys: list[tuple[str, str, str]] = []
+    relevant = {
+        EventName.SESSION_STARTED.value,
+        EventName.STT_STREAM_STARTED.value,
+        EventName.STT_PROVIDER_READY.value,
+        EventName.STT_FIRST_DELTA.value,
+        EventName.STT_INPUT_COMMITTED.value,
+        EventName.STT_COMPLETED.value,
+        EventName.STT_CLIENT_OBSERVED.value,
+        EventName.VAD_SPEECH_STARTED.value,
+        EventName.VAD_SPEECH_ENDED.value,
+    }
+
+    with Path(path).open(encoding='utf-8') as file:
+        for line_number, raw in enumerate(file, start=1):
+            if not raw.strip():
+                continue
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f'{path}:{line_number}: 잘못된 JSON') from exc
+            if not isinstance(data, dict) or data.get('event') not in relevant:
+                continue
+            run_id = data.get('run_id')
+            session_id = data.get('session_id')
+            timestamp = data.get('monotonic_ms')
+            if not isinstance(run_id, str) or not run_id:
+                raise ValueError(f'{path}:{line_number}: run_id가 필요합니다')
+            if not isinstance(session_id, str) or not session_id:
+                raise ValueError(f'{path}:{line_number}: session_id가 필요합니다')
+            if (
+                isinstance(timestamp, bool)
+                or not isinstance(timestamp, (int, float))
+                or not isfinite(timestamp)
+            ):
+                raise ValueError(f'{path}:{line_number}: monotonic_ms가 필요합니다')
+            timestamp = float(timestamp)
+            session_key = (run_id, session_id)
+            event = data['event']
+            if event == EventName.SESSION_STARTED.value:
+                metadata = data.get('metadata')
+                mode = metadata.get('stt_mode') if isinstance(metadata, dict) else None
+                if isinstance(mode, str) and mode:
+                    session_modes[session_key] = mode
+                if isinstance(metadata, dict):
+                    session_interactions[session_key] = metadata.get(
+                        'interaction_mode', 'push_to_talk'
+                    )
+                continue
+
+            client_event_id = data.get('client_event_id')
+            if not isinstance(client_event_id, str) or not client_event_id:
+                raise ValueError(f'{path}:{line_number}: client_event_id가 필요합니다')
+            key = (run_id, session_id, client_event_id)
+            item = pending.get(key)
+            if item is None:
+                item = _PendingStt(
+                    index=len(ordered_keys),
+                    run_id=run_id,
+                    session_id=session_id,
+                    client_event_id=client_event_id,
+                    stt_mode=session_modes.get(session_key, 'unknown'),
+                    interaction_mode=session_interactions.get(session_key, 'push_to_talk'),
+                )
+                pending[key] = item
+                ordered_keys.append(key)
+
+            if event == EventName.STT_STREAM_STARTED.value and item.stream_started_ms is None:
+                item.stream_started_ms = timestamp
+            elif event == EventName.VAD_SPEECH_STARTED.value:
+                item.vad_start_observed = True
+            elif event == EventName.VAD_SPEECH_ENDED.value:
+                item.vad_end_observed = True
+            elif event == EventName.STT_PROVIDER_READY.value and item.provider_ready_ms is None:
+                item.provider_ready_ms = timestamp
+            elif event == EventName.STT_FIRST_DELTA.value and item.first_delta_ms is None:
+                item.first_delta_ms = timestamp
+            elif event == EventName.STT_INPUT_COMMITTED.value and item.input_committed_ms is None:
+                item.input_committed_ms = timestamp
+            elif event == EventName.STT_COMPLETED.value and item.completed_ms is None:
+                outcome = data.get('outcome')
+                if outcome is not None and not isinstance(outcome, str):
+                    raise ValueError(f'{path}:{line_number}: outcome 형식이 잘못됐습니다')
+                item.completed_ms = timestamp
+                item.outcome = outcome
+            elif event == EventName.STT_CLIENT_OBSERVED.value:
+                elapsed = data.get('client_elapsed_ms')
+                if (
+                    isinstance(elapsed, bool)
+                    or not isinstance(elapsed, (int, float))
+                    or not isfinite(elapsed)
+                    or elapsed < 0
+                ):
+                    raise ValueError(
+                        f'{path}:{line_number}: client_elapsed_ms 형식이 잘못됐습니다'
+                    )
+                if item.release_to_final_ms is None:
+                    item.release_to_final_ms = round(float(elapsed), 3)
+
+    results = []
+    for key in ordered_keys:
+        item = pending[key]
+        missing = []
+        if item.input_committed_ms is not None and item.completed_ms is None:
+            missing.append(EventName.STT_COMPLETED.value)
+        if item.outcome == 'success':
+            if item.interaction_mode == 'vad':
+                if not item.vad_start_observed:
+                    missing.append(EventName.VAD_SPEECH_STARTED.value)
+                if not item.vad_end_observed:
+                    missing.append(EventName.VAD_SPEECH_ENDED.value)
+            if item.input_committed_ms is None:
+                missing.append(EventName.STT_INPUT_COMMITTED.value)
+            if item.stt_mode == 'streaming_push_to_talk':
+                if item.stream_started_ms is None:
+                    missing.append(EventName.STT_STREAM_STARTED.value)
+                if item.provider_ready_ms is None:
+                    missing.append(EventName.STT_PROVIDER_READY.value)
+                if item.first_delta_ms is None:
+                    missing.append(EventName.STT_FIRST_DELTA.value)
+            if item.release_to_final_ms is None:
+                missing.append(EventName.STT_CLIENT_OBSERVED.value)
+
+        def delta(
+            after: float | None,
+            before: float | None,
+            client_event_id: str = item.client_event_id,
+        ) -> float | None:
+            if after is None or before is None:
+                return None
+            value = round(after - before, 3)
+            if value < 0:
+                raise ValueError(
+                    f'{path}: {client_event_id} STT 이벤트 순서가 잘못됐습니다'
+                )
+            return value
+
+        results.append(
+            SttLatencySample(
+                run_id=item.run_id,
+                session_id=item.session_id,
+                client_event_id=item.client_event_id,
+                stt_mode=item.stt_mode,
+                outcome=item.outcome,
+                stream_to_provider_ready_ms=delta(
+                    item.provider_ready_ms,
+                    item.stream_started_ms,
+                ),
+                stream_to_first_delta_ms=delta(
+                    item.first_delta_ms,
+                    item.stream_started_ms,
+                ),
+                input_to_completed_ms=delta(
+                    item.completed_ms,
+                    item.input_committed_ms,
+                ),
+                release_to_final_ms=(
+                    item.release_to_final_ms if item.interaction_mode == 'push_to_talk' else None
+                ),
+                missing=tuple(missing),
+                interaction_mode=item.interaction_mode,
+                vad_end_to_final_ms=(
+                    item.release_to_final_ms
+                    if item.interaction_mode == 'vad' and item.vad_end_observed
+                    else None
+                ),
+                vad_start_observed=item.vad_start_observed,
+                vad_end_observed=item.vad_end_observed,
+            )
+        )
+    return results
+
+
+def build_stt_report(
+    samples: Sequence[SttLatencySample],
+    *,
+    skip_first: int = 0,
+) -> dict[str, object]:
+    """STT와 입력 방식별 지연 분포를 분리하고 기존 PTT 그룹 키는 유지한다."""
+    if skip_first < 0:
+        raise ValueError('skip_first는 0 이상이어야 합니다')
+    report: dict[str, object] = {}
+    groups = sorted({(sample.stt_mode, sample.interaction_mode) for sample in samples})
+    for mode, interaction in groups:
+        all_selected = [
+            sample for sample in samples
+            if sample.stt_mode == mode and sample.interaction_mode == interaction
+        ]
+        skipped = min(skip_first, len(all_selected))
+        selected = all_selected[skipped:]
+        successful = [sample for sample in selected if sample.outcome == 'success']
+
+        group_key = mode if interaction == 'push_to_talk' else f'{mode}:{interaction}'
+        client_metric = (
+            'vad_end_to_final_ms' if interaction == 'vad' else 'release_to_final_ms'
+        )
+        report[group_key] = {
+            'interaction_mode': interaction,
+            'count': len(selected),
+            'total_count': len(all_selected),
+            'skipped_warmup_count': skipped,
+            'success_count': len(successful),
+            'outcomes': dict(
+                sorted(
+                    Counter(
+                        sample.outcome
+                        for sample in selected
+                        if sample.outcome is not None
+                    ).items()
+                )
+            ),
+            'missing_events': dict(
+                sorted(Counter(event for sample in selected for event in sample.missing).items())
+            ),
+            'stream_to_provider_ready_ms': _latency_distribution(
+                _stt_values(successful, 'stream_to_provider_ready_ms')
+            ),
+            'stream_to_first_delta_ms': _latency_distribution(
+                _stt_values(successful, 'stream_to_first_delta_ms')
+            ),
+            'input_to_completed_ms': _latency_distribution(
+                _stt_values(successful, 'input_to_completed_ms')
+            ),
+            client_metric: _latency_distribution(
+                _stt_values(successful, client_metric)
+            ),
+        }
+    return report
+
+
+def build_vad_report(path: str | Path) -> dict[str, object]:
+    """VAD 관측 지연을 요약한다. 정답 라벨 없는 품질 비율은 만들지 않는다."""
+    holds = [
+        sample for sample in summarize_hold_latencies(path)
+        if sample.interaction_mode == 'vad'
+    ]
+    stt = [
+        sample for sample in summarize_stt_latencies(path)
+        if sample.interaction_mode == 'vad'
+    ]
+    successful = [sample for sample in stt if sample.outcome == 'success']
+    return {
+        'interaction_mode': 'vad',
+        'hold_count': len(holds),
+        'observed_start_count': sum(sample.vad_start_observed for sample in stt),
+        'observed_end_count': sum(sample.vad_end_observed for sample in stt),
+        'cancelled_hold_count': sum(
+            sample.hold_to_cancellation_ms is not None for sample in holds
+        ),
+        'success_count': len(successful),
+        'audio_stop_outcomes': dict(sorted(Counter(
+            sample.audio_stop_outcome for sample in holds
+            if sample.audio_stop_outcome is not None
+        ).items())),
+        'stt_outcomes': dict(sorted(Counter(
+            sample.outcome for sample in stt if sample.outcome is not None
+        ).items())),
+        'vad_start_to_audio_stop_ms': _latency_distribution([
+            sample.vad_start_to_audio_stop_ms
+            for sample in holds if sample.vad_start_to_audio_stop_ms is not None
+        ]),
+        'vad_end_to_final_ms': _latency_distribution(
+            _stt_values(successful, 'vad_end_to_final_ms')
+        ),
+        'missing_events': dict(sorted(Counter(
+            event for sample in [*holds, *stt] for event in sample.missing
+        ).items())),
+        'false_start_rate': None,
+        'mid_utterance_cut_rate': None,
+        'quality_note': '오감지와 발화 중간 절단 비율은 실제 녹음의 정답 라벨로 별도 측정해야 합니다.',
     }

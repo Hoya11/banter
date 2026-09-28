@@ -8,12 +8,20 @@ import asyncio
 import base64
 import json
 import threading
+import time
+from contextlib import asynccontextmanager
 
+import pytest
 from fastapi import WebSocket, WebSocketDisconnect
 from fastapi.testclient import TestClient
 
 from api.app import create_app
-from api.event_log import EventName, JsonlEventRecorder, summarize_hold_latencies
+from api.event_log import (
+    EventName,
+    JsonlEventRecorder,
+    summarize_hold_latencies,
+    summarize_stt_latencies,
+)
 
 
 class FakeStream:
@@ -160,7 +168,9 @@ def test_ws_streams_tokens_then_end():
     client = TestClient(app)
     with client.websocket_connect('/ws') as ws:
         hello, _ = _start_session(ws)
-        assert hello == {'type': 'hello', 'voice': False, 'stt': False}  # 접속 시 모드 안내
+        assert hello == {
+            'type': 'hello', 'voice': False, 'stt': False, 'interaction_mode': 'push_to_talk'
+        }  # 접속 시 모드 안내
         ws.send_text('하이')
         assert ws.receive_json() == {'type': 'start', 'speaker': 'ai_a'}
         assert ws.receive_json() == {'type': 'token', 'text': '안'}
@@ -667,6 +677,7 @@ def test_ws_session_event_records_safe_reproducibility_metadata(tmp_path):
     )
     assert session_event['metadata'] == {
         'baseline_id': 'push-to-talk-v1',
+        'interaction_mode': 'push_to_talk',
         'utterance_model': 'fake-model',
         'protocol_version': 1,
         'voice_mode': False,
@@ -806,8 +817,18 @@ def test_ws_stt_failure_finishes_cancelled_sample(tmp_path):
             )
         )
         ws.send_text(json.dumps({'type': 'say', 'text': '텍스트로 다시 시작'}))
-        while ws.receive_json()['type'] != 'start':
-            pass
+        messages = []
+        while True:
+            message = ws.receive_json()
+            messages.append(message)
+            if message['type'] == 'start':
+                break
+
+    assert {
+        'type': 'stt_error',
+        'client_event_id': 'stt-failure-1',
+        'code': 'provider_unavailable',
+    } in messages
 
     sample = summarize_hold_latencies(path)[0]
     assert sample.hold_to_cancellation_ms is not None
@@ -903,8 +924,18 @@ def test_ws_hold_timeout_is_recorded_as_cancellation(tmp_path, monkeypatch):
                 }
             )
         )
-        while ws.receive_json()['type'] != 'done':
-            pass
+        messages = []
+        while True:
+            message = ws.receive_json()
+            messages.append(message)
+            if message['type'] == 'done':
+                break
+
+    assert {
+        'type': 'stt_error',
+        'client_event_id': 'timeout-hold-1',
+        'code': 'hold_expired',
+    } in messages
 
     sample = summarize_hold_latencies(path)[0]
     assert sample.hold_to_cancellation_ms is not None
@@ -1068,7 +1099,9 @@ def test_ws_audio_follows_end_when_tts():
     client = TestClient(app)
     with client.websocket_connect('/ws') as ws:
         hello, _ = _start_session(ws)
-        assert hello == {'type': 'hello', 'voice': True, 'stt': False}  # 음성 모드 안내
+        assert hello == {
+            'type': 'hello', 'voice': True, 'stt': False, 'interaction_mode': 'push_to_talk'
+        }  # 음성 모드 안내
         ws.send_text('하이')
         audio = None
         for _ in range(10):
@@ -1206,6 +1239,7 @@ def test_ws_voice_message_transcribed_and_joins_as_say():
     with client.websocket_connect('/ws') as ws:
         hello, _ = _start_session(ws)
         assert hello['stt'] is True  # FE가 말하기 버튼을 보여줄 근거
+        assert 'stt_stream' not in hello
         b64 = base64.b64encode(AUDIO).decode('ascii')
         ws.send_text(
             _json.dumps(
@@ -1226,7 +1260,11 @@ def test_ws_voice_message_transcribed_and_joins_as_say():
                 }
             )
         )
-        assert ws.receive_json() == {'type': 'you', 'text': '음성으로 말했어요'}  # 전사 echo
+        assert ws.receive_json() == {
+            'type': 'you',
+            'text': '음성으로 말했어요',
+            'client_event_id': 'voice-hold-1',
+        }
         start = ws.receive_json()
         assert start['type'] == 'start'  # 전사가 유저 발화로 처리돼 턴 시작
         assert start['after_client_event_id'] == 'voice-hold-1'
@@ -1234,6 +1272,1464 @@ def test_ws_voice_message_transcribed_and_joins_as_say():
             if ws.receive_json()['type'] == 'end':
                 break
         assert any('음성으로 말했어요' in p for p in rec.prompts)  # 프롬프트 반영
+
+
+def test_ws_short_file_voice_returns_retryable_error_and_recovers(tmp_path):
+    class UnexpectedSTT:
+        def __init__(self):
+            self.calls = 0
+
+        async def transcribe(self, audio: bytes, mime: str = 'audio/webm') -> str:
+            self.calls += 1
+            return '호출되면 안 됨'
+
+    stt = UnexpectedSTT()
+    event_path = tmp_path / 'events.jsonl'
+    app = create_app(
+        FakeStream(),
+        stt_client=stt,
+        max_turns=1,
+        radio_sec=100,
+        event_recorder=JsonlEventRecorder(event_path),
+    )
+    client_event_id = 'short-file-voice-1'
+    text_event_id = 'text-after-short-file-1'
+
+    with TestClient(app).websocket_connect('/ws') as ws:
+        _start_session(ws)
+        _send_hold(ws, client_event_id)
+        ws.send_text(
+            json.dumps(
+                {
+                    'type': 'voice',
+                    'client_event_id': client_event_id,
+                    'audio': base64.b64encode(b'A' * 100).decode('ascii'),
+                    'mime': 'audio/webm',
+                }
+            )
+        )
+        assert ws.receive_json() == {
+            'type': 'stt_error',
+            'client_event_id': client_event_id,
+            'code': 'too_short',
+        }
+        ws.send_text(
+            json.dumps(
+                {
+                    'type': 'say',
+                    'client_event_id': text_event_id,
+                    'text': '짧은 녹음 뒤 텍스트',
+                }
+            )
+        )
+        messages = []
+        while True:
+            message = ws.receive_json()
+            messages.append(message)
+            if message['type'] == 'done':
+                break
+
+    assert stt.calls == 0
+    assert any(
+        message.get('type') == 'start'
+        and message.get('after_client_event_id') == text_event_id
+        for message in messages
+    )
+    events = _read_events(event_path)
+    completed = [
+        event
+        for event in events
+        if event['event'] == EventName.STT_COMPLETED
+        and event['client_event_id'] == client_event_id
+    ]
+    cancelled = [
+        event
+        for event in events
+        if event['event'] == EventName.HOLD_CANCELLED
+        and event['client_event_id'] == client_event_id
+    ]
+    assert len(completed) == 1
+    assert completed[0]['outcome'] == 'too_short'
+    assert len(cancelled) == 1
+
+
+def test_ws_empty_file_transcript_returns_retryable_error_and_recovers(tmp_path):
+    class EmptySTT:
+        async def transcribe(self, audio: bytes, mime: str = 'audio/webm') -> str:
+            return ''
+
+    event_path = tmp_path / 'events.jsonl'
+    app = create_app(
+        FakeStream(),
+        stt_client=EmptySTT(),
+        max_turns=1,
+        radio_sec=100,
+        event_recorder=JsonlEventRecorder(event_path),
+    )
+    client_event_id = 'empty-file-transcript-1'
+    text_event_id = 'text-after-empty-file-1'
+
+    with TestClient(app).websocket_connect('/ws') as ws:
+        _start_session(ws)
+        _send_hold(ws, client_event_id)
+        ws.send_text(
+            json.dumps(
+                {
+                    'type': 'voice',
+                    'client_event_id': client_event_id,
+                    'audio': base64.b64encode(b'A' * 8000).decode('ascii'),
+                    'mime': 'audio/webm',
+                }
+            )
+        )
+        assert ws.receive_json() == {
+            'type': 'stt_error',
+            'client_event_id': client_event_id,
+            'code': 'empty_transcript',
+        }
+        ws.send_text(
+            json.dumps(
+                {
+                    'type': 'say',
+                    'client_event_id': text_event_id,
+                    'text': '빈 전사 뒤 텍스트',
+                }
+            )
+        )
+        messages = []
+        while True:
+            message = ws.receive_json()
+            messages.append(message)
+            if message['type'] == 'done':
+                break
+
+    assert any(
+        message.get('type') == 'start'
+        and message.get('after_client_event_id') == text_event_id
+        for message in messages
+    )
+    events = _read_events(event_path)
+    completed = [
+        event
+        for event in events
+        if event['event'] == EventName.STT_COMPLETED
+        and event['client_event_id'] == client_event_id
+    ]
+    cancelled = [
+        event
+        for event in events
+        if event['event'] == EventName.HOLD_CANCELLED
+        and event['client_event_id'] == client_event_id
+    ]
+    assert len(completed) == 1
+    assert completed[0]['outcome'] == 'empty'
+    assert len(cancelled) == 1
+
+
+def test_ws_legacy_voice_gets_a_log_correlation_id(tmp_path):
+    class FakeSTT:
+        async def transcribe(self, audio: bytes, mime: str = 'audio/webm') -> str:
+            return '레거시 음성'
+
+    event_path = tmp_path / 'events.jsonl'
+    app = create_app(
+        FakeStream(),
+        stt_client=FakeSTT(),
+        max_turns=1,
+        radio_sec=100,
+        event_recorder=JsonlEventRecorder(event_path),
+        run_metadata={'stt_mode': 'record_then_transcribe'},
+    )
+
+    with TestClient(app).websocket_connect('/ws') as ws:
+        _start_session(ws)
+        ws.send_text(
+            json.dumps(
+                {
+                    'type': 'voice',
+                    'audio': base64.b64encode(b'A' * 8000).decode('ascii'),
+                    'mime': 'audio/webm',
+                }
+            )
+        )
+        assert ws.receive_json() == {'type': 'you', 'text': '레거시 음성'}
+        while ws.receive_json()['type'] != 'done':
+            pass
+
+    samples = summarize_stt_latencies(event_path)
+    assert len(samples) == 1
+    assert samples[0].client_event_id == 'legacy-stt-1'
+    assert samples[0].outcome == 'success'
+    assert samples[0].missing == (EventName.STT_CLIENT_OBSERVED.value,)
+
+
+def test_ws_file_stt_received_before_hold_deadline_finishes_processing(monkeypatch):
+    import api.app as app_module
+
+    monkeypatch.setattr(app_module, 'HOLD_POLL_SEC', 0.02)
+
+    class HoldRecorder:
+        def __init__(self):
+            self.hold_received = threading.Event()
+
+        def record(self, event, **kwargs):
+            if event == EventName.HOLD_RECEIVED:
+                self.hold_received.set()
+
+        def flush(self):
+            pass
+
+    class DelayedSTT:
+        async def transcribe(self, audio: bytes, mime: str = 'audio/webm') -> str:
+            await asyncio.sleep(0.05)
+            return '늦지만 유효한 전사'
+
+    recorder = HoldRecorder()
+    app = create_app(
+        FakeStream(),
+        stt_client=DelayedSTT(),
+        max_turns=1,
+        radio_sec=0.05,
+        event_recorder=recorder,
+    )
+    client_event_id = 'file-before-deadline-1'
+
+    with TestClient(app).websocket_connect('/ws') as ws:
+        _start_session(ws)
+        _send_hold(ws, client_event_id)
+        assert recorder.hold_received.wait(timeout=1)
+        time.sleep(0.07)
+        ws.send_text(
+            json.dumps(
+                {
+                    'type': 'voice',
+                    'client_event_id': client_event_id,
+                    'audio': base64.b64encode(b'A' * 8000).decode('ascii'),
+                    'mime': 'audio/webm',
+                }
+            )
+        )
+        assert ws.receive_json() == {
+            'type': 'you',
+            'text': '늦지만 유효한 전사',
+            'client_event_id': client_event_id,
+        }
+        while ws.receive_json()['type'] != 'done':
+            pass
+
+
+def test_ws_file_stt_timeout_releases_session_for_next_input(monkeypatch):
+    import api.app as app_module
+
+    monkeypatch.setattr(app_module, 'FILE_STT_TIMEOUT_SEC', 0.01)
+
+    class HangingSTT:
+        def __init__(self):
+            self.started = threading.Event()
+            self.cancelled = threading.Event()
+
+        async def transcribe(self, audio: bytes, mime: str = 'audio/webm') -> str:
+            self.started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.cancelled.set()
+                raise
+
+    stt = HangingSTT()
+    app = create_app(
+        FakeStream(),
+        stt_client=stt,
+        max_turns=1,
+        radio_sec=100,
+    )
+    voice_event_id = 'file-timeout-1'
+    text_event_id = 'text-after-file-timeout-1'
+
+    with TestClient(app).websocket_connect('/ws') as ws:
+        _start_session(ws)
+        _send_hold(ws, voice_event_id)
+        ws.send_text(
+            json.dumps(
+                {
+                    'type': 'voice',
+                    'client_event_id': voice_event_id,
+                    'audio': base64.b64encode(b'A' * 8000).decode('ascii'),
+                    'mime': 'audio/webm',
+                }
+            )
+        )
+        assert stt.started.wait(timeout=1)
+        ws.send_text(
+            json.dumps(
+                {
+                    'type': 'say',
+                    'client_event_id': text_event_id,
+                    'text': '전사 실패 뒤 텍스트',
+                }
+            )
+        )
+        assert stt.cancelled.wait(timeout=1)
+
+        messages = []
+        while True:
+            message = ws.receive_json()
+            messages.append(message)
+            if message['type'] == 'done':
+                break
+
+    assert any(
+        message == {
+            'type': 'stt_error',
+            'client_event_id': voice_event_id,
+            'code': 'provider_unavailable',
+        }
+        for message in messages
+    )
+    assert any(
+        message.get('type') == 'start'
+        and message.get('after_client_event_id') == text_event_id
+        for message in messages
+    )
+
+
+class FakeStreamingSTTTurn:
+    def __init__(self, final_text, on_delta, delta_text='임시 전사'):
+        self.final_text = final_text
+        self.on_delta = on_delta
+        self.delta_text = delta_text
+        self.appended = []
+        self.finish_calls = 0
+        self.cancel_calls = 0
+        self._sent_delta = False
+
+    async def append(self, audio):
+        self.appended.append(audio)
+        if not self._sent_delta:
+            self._sent_delta = True
+            self.on_delta(self.delta_text)
+            self.on_delta(f'{self.delta_text} 갱신')
+
+    async def finish(self):
+        self.finish_calls += 1
+        return self.final_text
+
+    async def cancel(self):
+        self.cancel_calls += 1
+
+
+class FakeStreamingSTTClient:
+    def __init__(self, final_text='스트리밍 최종 전사', *, pending=False):
+        self.final_text = final_text
+        self.pending = pending
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.start_cancelled = threading.Event()
+        self.start_calls = 0
+        self.turns = []
+
+    async def start(self, *, on_delta):
+        self.start_calls += 1
+        self.started.set()
+        try:
+            while self.pending and not self.release.is_set():
+                await asyncio.sleep(0.001)
+        except asyncio.CancelledError:
+            self.start_cancelled.set()
+            raise
+        turn = FakeStreamingSTTTurn(self.final_text, on_delta)
+        self.turns.append(turn)
+        return turn
+
+
+STREAMING_STT_CHUNKS = (
+    b'A' * 4800,
+    b'B' * 4800,
+    b'C' * 2400,
+)
+
+
+def _send_stream_start(ws, client_event_id):
+    ws.send_text(
+        json.dumps(
+            {
+                'type': 'voice_stream_start',
+                'client_event_id': client_event_id,
+                'encoding': 'pcm_s16le',
+                'sample_rate_hz': 24000,
+                'channels': 1,
+            }
+        )
+    )
+
+
+def _send_stream_chunk(ws, client_event_id, sequence_number, audio):
+    ws.send_text(
+        json.dumps(
+            {
+                'type': 'voice_stream_chunk',
+                'client_event_id': client_event_id,
+                'sequence_number': sequence_number,
+                'audio': base64.b64encode(audio).decode('ascii'),
+            }
+        )
+    )
+
+
+def _send_stream_commit(ws, client_event_id, final_sequence_number, total_samples):
+    ws.send_text(
+        json.dumps(
+            {
+                'type': 'voice_stream_commit',
+                'client_event_id': client_event_id,
+                'final_sequence_number': final_sequence_number,
+                'total_samples': total_samples,
+            }
+        )
+    )
+
+
+def _send_hold(ws, client_event_id):
+    ws.send_text(
+        json.dumps(
+            {
+                'type': 'hold',
+                'client_event_id': client_event_id,
+                'audio_stop': {'outcome': 'idle'},
+            }
+        )
+    )
+
+
+class _MemoryStreamingSocket:
+    """같은 이벤트 루프에서 입력과 공급자 작업 순서를 제어한다."""
+
+    def __init__(self):
+        self.incoming = asyncio.Queue()
+        self.outgoing = asyncio.Queue()
+        self.sent = []
+        self.closed = False
+        self.input_idle = asyncio.Event()
+
+    async def accept(self):
+        pass
+
+    def send_text(self, message):
+        self.input_idle.clear()
+        self.incoming.put_nowait(message)
+
+    async def receive_text(self):
+        if self.closed:
+            raise WebSocketDisconnect(code=1001)
+        if self.incoming.empty():
+            self.input_idle.set()
+        message = await self.incoming.get()
+        if message is None:
+            raise WebSocketDisconnect(code=1001)
+        return message
+
+    async def send_json(self, message):
+        self.sent.append(message)
+        self.outgoing.put_nowait(message)
+
+    async def receive_type(self, message_type):
+        # 시간 상한은 교착 검출용이며 실제 전송 성능을 측정하지 않는다.
+        async with asyncio.timeout(2):
+            while True:
+                message = await self.outgoing.get()
+                if message['type'] == message_type:
+                    return message
+
+
+@asynccontextmanager
+async def _memory_streaming_session(provider, *, recorder=None, stream=None):
+    app = create_app(
+        stream or FakeStream(),
+        streaming_stt_client=provider,
+        event_recorder=recorder,
+        max_turns=5,
+        radio_sec=100,
+    )
+    endpoint = next(route.endpoint for route in app.routes if route.path == '/ws')
+    socket = _MemoryStreamingSocket()
+    task = asyncio.create_task(endpoint(socket))
+    try:
+        await socket.receive_type('hello')
+        socket.send_text(json.dumps({'type': 'session_start'}))
+        await socket.receive_type('session_started')
+        yield socket
+    finally:
+        socket.closed = True
+        socket.incoming.put_nowait(None)
+        await asyncio.wait_for(task, timeout=3)
+
+
+class _BlockedStreamingTurn(FakeStreamingSTTTurn):
+    def __init__(self, *, block_cancel=False):
+        super().__init__('이전 발화의 전사', lambda _text: None)
+        self.append_started = asyncio.Event()
+        self.append_cancelled = asyncio.Event()
+        self.append_release = asyncio.Event()
+        self.cancel_started = asyncio.Event()
+        self.cancel_release = asyncio.Event()
+        if not block_cancel:
+            self.cancel_release.set()
+
+    async def append(self, audio):
+        self.append_started.set()
+        try:
+            await self.append_release.wait()
+        except asyncio.CancelledError:
+            self.append_cancelled.set()
+            raise
+        await super().append(audio)
+
+    async def cancel(self):
+        self.cancel_calls += 1
+        self.cancel_started.set()
+        await self.cancel_release.wait()
+
+
+class _PreparedStreamingProvider:
+    def __init__(self, *turns):
+        self.turns = iter(turns)
+
+    async def start(self, *, on_delta):
+        turn = next(self.turns)
+        turn.on_delta = on_delta
+        return turn
+
+
+def test_ws_streaming_stt_drains_buffer_when_start_finishes_without_new_input():
+    async def scenario():
+        start_entered = asyncio.Event()
+        start_release = asyncio.Event()
+        all_appended = asyncio.Event()
+
+        class RecordingTurn(FakeStreamingSTTTurn):
+            async def append(self, audio):
+                await super().append(audio)
+                if len(self.appended) == len(STREAMING_STT_CHUNKS):
+                    all_appended.set()
+
+        turn = RecordingTurn('아직 확정하지 않은 전사', lambda _text: None)
+
+        class Provider:
+            async def start(self, *, on_delta):
+                start_entered.set()
+                await start_release.wait()
+                turn.on_delta = on_delta
+                return turn
+
+        async with _memory_streaming_session(Provider()) as ws:
+            client_event_id = 'ready-without-next-chunk'
+            _send_hold(ws, client_event_id)
+            _send_stream_start(ws, client_event_id)
+            await asyncio.wait_for(start_entered.wait(), timeout=2)
+            for sequence, audio in enumerate(STREAMING_STT_CHUNKS, start=1):
+                _send_stream_chunk(ws, client_event_id, sequence, audio)
+            await asyncio.wait_for(ws.input_idle.wait(), timeout=2)
+            start_release.set()
+
+            await asyncio.wait_for(all_appended.wait(), timeout=2)
+            assert turn.appended == list(STREAMING_STT_CHUNKS)
+            assert turn.finish_calls == 0
+
+    asyncio.run(scenario())
+
+
+def test_ws_streaming_stt_commit_waits_for_last_append_without_blocking_input():
+    async def scenario():
+        input_committed = asyncio.Event()
+
+        class Recorder:
+            def record(self, event, **kwargs):
+                if event == EventName.STT_INPUT_COMMITTED:
+                    input_committed.set()
+
+        class OrderedTurn(_BlockedStreamingTurn):
+            async def finish(self):
+                assert self.appended == list(STREAMING_STT_CHUNKS)
+                return await super().finish()
+
+        turn = OrderedTurn()
+        provider = _PreparedStreamingProvider(turn)
+        async with _memory_streaming_session(provider, recorder=Recorder()) as ws:
+            try:
+                client_event_id = 'commit-after-buffer-drains'
+                _send_hold(ws, client_event_id)
+                _send_stream_start(ws, client_event_id)
+                _send_stream_chunk(ws, client_event_id, 1, STREAMING_STT_CHUNKS[0])
+                await asyncio.wait_for(turn.append_started.wait(), timeout=2)
+                for sequence, audio in enumerate(STREAMING_STT_CHUNKS[1:], start=2):
+                    _send_stream_chunk(ws, client_event_id, sequence, audio)
+                _send_stream_commit(ws, client_event_id, 3, 6000)
+                _send_stream_commit(ws, client_event_id, 3, 6000)
+
+                await asyncio.wait_for(input_committed.wait(), timeout=2)
+                assert turn.appended == []
+                assert turn.finish_calls == 0
+                turn.append_release.set()
+                assert await ws.receive_type('you') == {
+                    'type': 'you',
+                    'client_event_id': client_event_id,
+                    'text': turn.final_text,
+                }
+                assert turn.appended == list(STREAMING_STT_CHUNKS)
+                assert turn.finish_calls == 1
+            finally:
+                turn.append_release.set()
+
+    asyncio.run(scenario())
+
+
+def test_ws_text_input_preempts_blocked_append_and_slow_cancel():
+    async def scenario():
+        turn = _BlockedStreamingTurn(block_cancel=True)
+        prompts = []
+
+        class RecordingStream:
+            async def complete_stream(self, system, user):
+                prompts.append(user)
+                yield '응'
+
+        async with _memory_streaming_session(
+            _PreparedStreamingProvider(turn), stream=RecordingStream()
+        ) as ws:
+            try:
+                _send_hold(ws, 'blocked-voice-before-text')
+                _send_stream_start(ws, 'blocked-voice-before-text')
+                _send_stream_chunk(ws, 'blocked-voice-before-text', 1, b'A' * 4800)
+                await asyncio.wait_for(turn.append_started.wait(), timeout=2)
+                ws.send_text(json.dumps({
+                    'type': 'say',
+                    'client_event_id': 'text-preempts-slow-voice',
+                    'text': '느린 음성 대신 보낸 텍스트',
+                }))
+
+                start = await ws.receive_type('start')
+                await ws.receive_type('end')
+                await asyncio.wait_for(turn.append_cancelled.wait(), timeout=2)
+                await asyncio.wait_for(turn.cancel_started.wait(), timeout=2)
+                assert start['after_client_event_id'] == 'text-preempts-slow-voice'
+                assert not turn.append_release.is_set()
+                assert not turn.cancel_release.is_set()
+                assert turn.finish_calls == 0
+                assert any('느린 음성 대신 보낸 텍스트' in prompt for prompt in prompts)
+                assert all(turn.final_text not in prompt for prompt in prompts)
+                assert not any(message['type'] == 'you' for message in ws.sent)
+            finally:
+                turn.append_release.set()
+                turn.cancel_release.set()
+
+        assert turn.cancel_calls == 1
+
+    asyncio.run(scenario())
+
+
+def test_ws_text_input_preempts_start_that_returns_a_turn_after_cancellation():
+    async def scenario():
+        start_entered = asyncio.Event()
+        start_cancelled = asyncio.Event()
+        start_release = asyncio.Event()
+        turn = _BlockedStreamingTurn()
+        recorded = []
+
+        class Recorder:
+            def record(self, event, **kwargs):
+                recorded.append((event, kwargs))
+
+        class LateProvider:
+            async def start(self, *, on_delta):
+                start_entered.set()
+                try:
+                    await start_release.wait()
+                except asyncio.CancelledError:
+                    start_cancelled.set()
+                    await start_release.wait()
+                on_delta('취소 뒤 늦게 도착한 부분 전사')
+                return turn
+
+        async with _memory_streaming_session(LateProvider(), recorder=Recorder()) as ws:
+            try:
+                _send_hold(ws, 'late-provider-start')
+                _send_stream_start(ws, 'late-provider-start')
+                _send_stream_chunk(ws, 'late-provider-start', 1, b'A' * 4800)
+                await asyncio.wait_for(start_entered.wait(), timeout=2)
+                ws.send_text(json.dumps({
+                    'type': 'say',
+                    'client_event_id': 'text-before-late-start-returns',
+                    'text': '연결 준비를 기다리지 않는 입력',
+                }))
+
+                start = await ws.receive_type('start')
+                await ws.receive_type('end')
+                assert start['after_client_event_id'] == 'text-before-late-start-returns'
+                await asyncio.wait_for(start_cancelled.wait(), timeout=2)
+                assert not start_release.is_set()
+                assert turn.cancel_calls == 0
+
+                start_release.set()
+                await asyncio.wait_for(turn.cancel_started.wait(), timeout=2)
+                assert turn.appended == []
+                assert turn.finish_calls == 0
+                assert not any(message['type'] in {'you', 'stt_error'} for message in ws.sent)
+                assert not any(
+                    event in {EventName.STT_PROVIDER_READY, EventName.STT_FIRST_DELTA}
+                    and data.get('client_event_id') == 'late-provider-start'
+                    for event, data in recorded
+                )
+            finally:
+                start_release.set()
+
+        assert turn.cancel_calls == 1
+
+    asyncio.run(scenario())
+
+
+def test_ws_hold_off_cancels_blocked_append_without_releasing_it():
+    async def scenario():
+        turn = _BlockedStreamingTurn()
+        async with _memory_streaming_session(_PreparedStreamingProvider(turn)) as ws:
+            try:
+                client_event_id = 'hold-off-during-append'
+                _send_hold(ws, client_event_id)
+                _send_stream_start(ws, client_event_id)
+                _send_stream_chunk(ws, client_event_id, 1, b'A' * 4800)
+                await asyncio.wait_for(turn.append_started.wait(), timeout=2)
+                ws.send_text(json.dumps({
+                    'type': 'hold_off', 'client_event_id': client_event_id,
+                }))
+
+                await asyncio.wait_for(turn.append_cancelled.wait(), timeout=2)
+                await asyncio.wait_for(turn.cancel_started.wait(), timeout=2)
+                assert not turn.append_release.is_set()
+                assert turn.finish_calls == 0
+                assert not any(message['type'] == 'stt_error' for message in ws.sent)
+            finally:
+                turn.append_release.set()
+
+        assert turn.cancel_calls == 1
+
+    asyncio.run(scenario())
+
+
+def test_ws_new_hold_preempts_blocked_append_and_slow_cancel():
+    async def scenario():
+        old_turn = _BlockedStreamingTurn(block_cancel=True)
+        new_turn = FakeStreamingSTTTurn('새 발화만 반영', lambda _text: None)
+        provider = _PreparedStreamingProvider(old_turn, new_turn)
+        async with _memory_streaming_session(provider) as ws:
+            try:
+                _send_hold(ws, 'old-blocked-voice')
+                _send_stream_start(ws, 'old-blocked-voice')
+                _send_stream_chunk(ws, 'old-blocked-voice', 1, b'A' * 4800)
+                await asyncio.wait_for(old_turn.append_started.wait(), timeout=2)
+                _send_hold(ws, 'new-voice-before-old-cleanup')
+                _send_stream_start(ws, 'new-voice-before-old-cleanup')
+                for sequence, audio in enumerate(STREAMING_STT_CHUNKS, start=1):
+                    _send_stream_chunk(ws, 'new-voice-before-old-cleanup', sequence, audio)
+                _send_stream_commit(ws, 'new-voice-before-old-cleanup', 3, 6000)
+
+                assert await ws.receive_type('you') == {
+                    'type': 'you',
+                    'client_event_id': 'new-voice-before-old-cleanup',
+                    'text': new_turn.final_text,
+                }
+                await asyncio.wait_for(old_turn.append_cancelled.wait(), timeout=2)
+                await asyncio.wait_for(old_turn.cancel_started.wait(), timeout=2)
+                assert not old_turn.cancel_release.is_set()
+                assert new_turn.appended == list(STREAMING_STT_CHUNKS)
+                assert new_turn.finish_calls == 1
+                assert old_turn.finish_calls == 0
+                assert not any(
+                    message.get('client_event_id') == 'old-blocked-voice'
+                    and message['type'] in {'you', 'stt_error'}
+                    for message in ws.sent
+                )
+            finally:
+                old_turn.append_release.set()
+                old_turn.cancel_release.set()
+
+        assert old_turn.cancel_calls == 1
+
+    asyncio.run(scenario())
+
+
+def test_ws_streaming_stt_full_queue_fails_without_waiting_for_blocked_append(monkeypatch):
+    import api.app as app_module
+
+    monkeypatch.setattr(app_module, 'MAX_STREAM_STT_PENDING_CHUNKS', 2)
+
+    async def scenario():
+        turn = _BlockedStreamingTurn()
+        async with _memory_streaming_session(_PreparedStreamingProvider(turn)) as ws:
+            try:
+                client_event_id = 'full-pending-audio-queue'
+                _send_hold(ws, client_event_id)
+                _send_stream_start(ws, client_event_id)
+                _send_stream_chunk(ws, client_event_id, 1, b'A' * 4800)
+                await asyncio.wait_for(turn.append_started.wait(), timeout=2)
+                for sequence in range(2, 5):
+                    _send_stream_chunk(ws, client_event_id, sequence, b'B' * 4800)
+
+                assert await ws.receive_type('stt_error') == {
+                    'type': 'stt_error',
+                    'client_event_id': client_event_id,
+                    'code': 'provider_unavailable',
+                }
+                await asyncio.wait_for(turn.append_cancelled.wait(), timeout=2)
+                assert not turn.append_release.is_set()
+                assert turn.finish_calls == 0
+                ws.send_text(json.dumps({
+                    'type': 'say',
+                    'client_event_id': 'text-after-full-queue',
+                    'text': '대기열 실패 후 입력',
+                }))
+                start = await ws.receive_type('start')
+                assert start['after_client_event_id'] == 'text-after-full-queue'
+            finally:
+                turn.append_release.set()
+
+        assert turn.cancel_calls == 1
+
+    asyncio.run(scenario())
+
+
+def test_ws_streaming_stt_expired_queued_audio_is_not_sent_to_provider(monkeypatch):
+    import api.app as app_module
+    import api.stt_stream as stream_module
+
+    class QueueClock:
+        offset = 0
+
+        def time(self):
+            return asyncio.get_running_loop().time() + self.offset
+
+    clock = QueueClock()
+
+    class ClockedAsyncio:
+        # 전송 대기 기한만 앞으로 옮기고 실제 이벤트 루프와 watchdog은 유지한다.
+        def get_running_loop(self):
+            return clock
+
+        def __getattr__(self, name):
+            return getattr(asyncio, name)
+
+    monkeypatch.setattr(stream_module, 'asyncio', ClockedAsyncio())
+
+    async def scenario():
+        turn = _BlockedStreamingTurn()
+        async with _memory_streaming_session(_PreparedStreamingProvider(turn)) as ws:
+            try:
+                client_event_id = 'queued-audio-expired'
+                _send_hold(ws, client_event_id)
+                _send_stream_start(ws, client_event_id)
+                _send_stream_chunk(ws, client_event_id, 1, STREAMING_STT_CHUNKS[0])
+                await asyncio.wait_for(turn.append_started.wait(), timeout=2)
+                for sequence, audio in enumerate(STREAMING_STT_CHUNKS[1:], start=2):
+                    _send_stream_chunk(ws, client_event_id, sequence, audio)
+                await asyncio.wait_for(ws.input_idle.wait(), timeout=2)
+
+                clock.offset = app_module.HOLD_SEC + 1
+                turn.append_release.set()
+                assert await ws.receive_type('stt_error') == {
+                    'type': 'stt_error',
+                    'client_event_id': client_event_id,
+                    'code': 'provider_unavailable',
+                }
+                assert turn.appended == [STREAMING_STT_CHUNKS[0]]
+                assert turn.finish_calls == 0
+                ws.send_text(json.dumps({
+                    'type': 'say',
+                    'client_event_id': 'text-after-queue-expired',
+                    'text': '오래 기다린 음성 대신 텍스트',
+                }))
+                start = await ws.receive_type('start')
+                assert start['after_client_event_id'] == 'text-after-queue-expired'
+            finally:
+                turn.append_release.set()
+
+        assert turn.cancel_calls == 1
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('failure_stage', ['start', 'append'])
+def test_ws_streaming_stt_reports_background_failure_without_new_input(failure_stage):
+    async def scenario():
+        failure_entered = asyncio.Event()
+        failure_release = asyncio.Event()
+        retry_turn = FakeStreamingSTTTurn('실패 후 재발화', lambda _text: None)
+
+        class FailingTurn(FakeStreamingSTTTurn):
+            async def append(self, audio):
+                failure_entered.set()
+                await failure_release.wait()
+                raise RuntimeError('offline append failure')
+
+        failed_turn = FailingTurn('반영되면 안 되는 전사', lambda _text: None)
+
+        class Provider:
+            calls = 0
+
+            async def start(self, *, on_delta):
+                self.calls += 1
+                if self.calls > 1:
+                    retry_turn.on_delta = on_delta
+                    return retry_turn
+                if failure_stage == 'start':
+                    failure_entered.set()
+                    await failure_release.wait()
+                    raise RuntimeError('offline start failure')
+                failed_turn.on_delta = on_delta
+                return failed_turn
+
+        async with _memory_streaming_session(Provider()) as ws:
+            try:
+                client_event_id = f'background-{failure_stage}-failure'
+                _send_hold(ws, client_event_id)
+                _send_stream_start(ws, client_event_id)
+                if failure_stage == 'append':
+                    _send_stream_chunk(ws, client_event_id, 1, b'A' * 4800)
+                await asyncio.wait_for(failure_entered.wait(), timeout=2)
+                failure_release.set()
+
+                assert await ws.receive_type('stt_error') == {
+                    'type': 'stt_error',
+                    'client_event_id': client_event_id,
+                    'code': 'provider_unavailable',
+                }
+                _send_hold(ws, 'retry-after-background-failure')
+                _send_stream_start(ws, 'retry-after-background-failure')
+                for sequence, audio in enumerate(STREAMING_STT_CHUNKS, start=1):
+                    _send_stream_chunk(ws, 'retry-after-background-failure', sequence, audio)
+                _send_stream_commit(ws, 'retry-after-background-failure', 3, 6000)
+                assert await ws.receive_type('you') == {
+                    'type': 'you',
+                    'client_event_id': 'retry-after-background-failure',
+                    'text': retry_turn.final_text,
+                }
+                assert retry_turn.appended == list(STREAMING_STT_CHUNKS)
+                assert retry_turn.finish_calls == 1
+            finally:
+                failure_release.set()
+
+    asyncio.run(scenario())
+
+
+def test_ws_hello_advertises_streaming_stt_capability():
+    provider = FakeStreamingSTTClient()
+    app = create_app(FakeStream(), streaming_stt_client=provider)
+
+    with TestClient(app).websocket_connect('/ws') as ws:
+        assert ws.receive_json() == {
+            'type': 'hello',
+            'voice': False,
+            'stt': False,
+            'interaction_mode': 'push_to_talk',
+            'stt_stream': {
+                'encoding': 'pcm_s16le',
+                'sample_rate_hz': 24000,
+                'channels': 1,
+                'chunk_samples': 2400,
+            },
+        }
+
+    assert provider.start_calls == 0
+
+
+def test_ws_streaming_stt_buffers_until_ready_and_commits_final_once(tmp_path):
+    class CommitSignalingRecorder(JsonlEventRecorder):
+        def __init__(self, path):
+            super().__init__(path)
+            self.input_committed = threading.Event()
+            self.client_observed = threading.Event()
+
+        def record(self, event, **kwargs):
+            entry = super().record(event, **kwargs)
+            if event == EventName.STT_INPUT_COMMITTED:
+                self.input_committed.set()
+            if event == EventName.STT_CLIENT_OBSERVED:
+                self.client_observed.set()
+            return entry
+
+    class RecordingStream:
+        def __init__(self):
+            self.prompts = []
+
+        async def complete_stream(self, system: str, user: str):
+            self.prompts.append(user)
+            for _ in range(1000):
+                if recorder.client_observed.is_set():
+                    break
+                await asyncio.sleep(0.001)
+            else:
+                raise AssertionError('stt_observed를 받지 못했습니다')
+            yield '응'
+
+    event_path = tmp_path / 'events.jsonl'
+    recorder = CommitSignalingRecorder(event_path)
+    provider = FakeStreamingSTTClient(pending=True)
+    stream = RecordingStream()
+    app = create_app(
+        stream,
+        streaming_stt_client=provider,
+        event_recorder=recorder,
+        max_turns=1,
+        radio_sec=100,
+    )
+    client_event_id = 'stream-hold-1'
+
+    with TestClient(app).websocket_connect('/ws') as ws:
+        _start_session(ws)
+        _send_hold(ws, client_event_id)
+        _send_stream_start(ws, client_event_id)
+        _send_hold(ws, client_event_id)
+        assert provider.started.wait(timeout=1)
+
+        for sequence_number, audio in enumerate(STREAMING_STT_CHUNKS, start=1):
+            _send_stream_chunk(ws, client_event_id, sequence_number, audio)
+        _send_stream_commit(ws, client_event_id, 3, 6000)
+        _send_stream_commit(ws, client_event_id, 3, 6000)
+        assert recorder.input_committed.wait(timeout=1)
+        assert provider.turns == []
+
+        provider.release.set()
+        assert ws.receive_json() == {
+            'type': 'you',
+            'client_event_id': client_event_id,
+            'text': '스트리밍 최종 전사',
+        }
+        ws.send_text(
+            json.dumps(
+                {
+                    'type': 'stt_observed',
+                    'client_event_id': client_event_id,
+                    'milestone': 'final',
+                    'elapsed_ms': 147.5,
+                }
+            )
+        )
+        start = ws.receive_json()
+        assert start['type'] == 'start'
+        assert start['after_client_event_id'] == client_event_id
+        while ws.receive_json()['type'] != 'done':
+            pass
+
+    assert len(provider.turns) == 1
+    turn = provider.turns[0]
+    assert turn.appended == list(STREAMING_STT_CHUNKS)
+    assert turn.finish_calls == 1
+    assert turn.cancel_calls == 0
+    assert len(stream.prompts) == 1
+    assert stream.prompts[0].count('스트리밍 최종 전사') == 1
+    assert '임시 전사' not in stream.prompts[0]
+
+    events = _read_events(event_path)
+    first_deltas = [
+        event for event in events if event['event'] == EventName.STT_FIRST_DELTA
+    ]
+    provider_ready = [
+        event for event in events if event['event'] == EventName.STT_PROVIDER_READY
+    ]
+    input_committed = [
+        event for event in events if event['event'] == EventName.STT_INPUT_COMMITTED
+    ]
+    assert len(first_deltas) == 1
+    assert first_deltas[0]['client_event_id'] == client_event_id
+    assert len(provider_ready) == 1
+    assert provider_ready[0]['client_event_id'] == client_event_id
+    assert len(input_committed) == 1
+    client_observed = [
+        event for event in events if event['event'] == EventName.STT_CLIENT_OBSERVED
+    ]
+    assert len(client_observed) == 1
+    assert client_observed[0]['client_event_id'] == client_event_id
+    assert client_observed[0]['client_elapsed_ms'] == 147.5
+
+
+def test_ws_text_input_cancels_pending_finish_and_drops_late_transcript(tmp_path):
+    class LateFinishTurn(FakeStreamingSTTTurn):
+        def __init__(self):
+            super().__init__('취소 뒤 늦은 전사', lambda _text: None)
+            self.finish_started = threading.Event()
+            self.finish_cancelled = threading.Event()
+            self.release = threading.Event()
+
+        async def finish(self):
+            self.finish_calls += 1
+            self.finish_started.set()
+            try:
+                while not self.release.is_set():
+                    await asyncio.sleep(0.001)
+            except asyncio.CancelledError:
+                self.finish_cancelled.set()
+                while not self.release.is_set():
+                    await asyncio.sleep(0.001)
+            return self.final_text
+
+    class Provider:
+        def __init__(self, turn):
+            self.turn = turn
+
+        async def start(self, *, on_delta):
+            self.turn.on_delta = on_delta
+            return self.turn
+
+    class RecordingStream:
+        def __init__(self):
+            self.prompts = []
+
+        async def complete_stream(self, system: str, user: str):
+            self.prompts.append(user)
+            yield '응'
+
+    event_path = tmp_path / 'events.jsonl'
+    turn = LateFinishTurn()
+    stream = RecordingStream()
+    app = create_app(
+        stream,
+        streaming_stt_client=Provider(turn),
+        event_recorder=JsonlEventRecorder(event_path),
+        max_turns=1,
+        radio_sec=100,
+    )
+    old_event_id = 'stream-old-1'
+
+    with TestClient(app).websocket_connect('/ws') as ws:
+        _start_session(ws)
+        _send_hold(ws, old_event_id)
+        _send_stream_start(ws, old_event_id)
+        for sequence_number, audio in enumerate(STREAMING_STT_CHUNKS, start=1):
+            _send_stream_chunk(ws, old_event_id, sequence_number, audio)
+        _send_stream_commit(ws, old_event_id, 3, 6000)
+        assert turn.finish_started.wait(timeout=1)
+
+        ws.send_text(
+            json.dumps(
+                {
+                    'type': 'say',
+                    'client_event_id': 'text-after-cancel-1',
+                    'text': '새 텍스트 입력',
+                }
+            )
+        )
+        try:
+            assert turn.finish_cancelled.wait(timeout=1)
+        finally:
+            turn.release.set()
+
+        messages = []
+        while True:
+            message = ws.receive_json()
+            messages.append(message)
+            if message['type'] == 'done':
+                break
+
+    assert turn.finish_calls == 1
+    assert turn.cancel_calls == 1
+    assert not any(
+        message.get('type') == 'you' and message.get('text') == turn.final_text
+        for message in messages
+    )
+    assert any(
+        message.get('type') == 'start'
+        and message.get('after_client_event_id') == 'text-after-cancel-1'
+        for message in messages
+    )
+    assert len(stream.prompts) == 1
+    assert '새 텍스트 입력' in stream.prompts[0]
+    assert turn.final_text not in stream.prompts[0]
+
+    events = _read_events(event_path)
+    outcomes = [
+        event['outcome']
+        for event in events
+        if event['event'] == EventName.STT_COMPLETED
+        and event['client_event_id'] == old_event_id
+    ]
+    assert outcomes == ['cancelled']
+
+
+def test_ws_disconnect_cancels_pending_stream_finish(tmp_path):
+    class CompletionRecorder(JsonlEventRecorder):
+        def __init__(self, path):
+            super().__init__(path)
+            self.completed = threading.Event()
+
+        def record(self, event, **kwargs):
+            entry = super().record(event, **kwargs)
+            if event == EventName.STT_COMPLETED:
+                self.completed.set()
+            return entry
+
+    class PendingFinishTurn(FakeStreamingSTTTurn):
+        def __init__(self):
+            super().__init__('사용되지 않는 전사', lambda _text: None)
+            self.finish_started = threading.Event()
+            self.finish_cancelled = threading.Event()
+
+        async def finish(self):
+            self.finish_calls += 1
+            self.finish_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.finish_cancelled.set()
+                raise
+
+    class Provider:
+        def __init__(self, turn):
+            self.turn = turn
+
+        async def start(self, *, on_delta):
+            self.turn.on_delta = on_delta
+            return self.turn
+
+    event_path = tmp_path / 'events.jsonl'
+    turn = PendingFinishTurn()
+    recorder = CompletionRecorder(event_path)
+    app = create_app(
+        FakeStream(),
+        streaming_stt_client=Provider(turn),
+        event_recorder=recorder,
+        max_turns=1,
+        radio_sec=100,
+    )
+    client_event_id = 'stream-disconnect-1'
+
+    with TestClient(app).websocket_connect('/ws') as ws:
+        _start_session(ws)
+        _send_hold(ws, client_event_id)
+        _send_stream_start(ws, client_event_id)
+        for sequence_number, audio in enumerate(STREAMING_STT_CHUNKS, start=1):
+            _send_stream_chunk(ws, client_event_id, sequence_number, audio)
+        _send_stream_commit(ws, client_event_id, 3, 6000)
+        assert turn.finish_started.wait(timeout=1)
+        ws.close()
+        assert turn.finish_cancelled.wait(timeout=1)
+        assert recorder.completed.wait(timeout=1)
+
+    assert turn.finish_calls == 1
+    assert turn.cancel_calls == 1
+    recorder.flush()
+    events = _read_events(event_path)
+    outcomes = [
+        event['outcome']
+        for event in events
+        if event['event'] == EventName.STT_COMPLETED
+        and event['client_event_id'] == client_event_id
+    ]
+    assert outcomes == ['cancelled']
+
+
+def test_ws_streaming_stt_ignores_duplicate_sequence():
+    provider = FakeStreamingSTTClient()
+    app = create_app(
+        FakeStream(),
+        streaming_stt_client=provider,
+        max_turns=1,
+        radio_sec=100,
+    )
+    client_event_id = 'stream-duplicate-1'
+
+    with TestClient(app).websocket_connect('/ws') as ws:
+        _start_session(ws)
+        _send_hold(ws, client_event_id)
+        _send_stream_start(ws, client_event_id)
+        assert provider.started.wait(timeout=1)
+        _send_stream_chunk(ws, client_event_id, 1, STREAMING_STT_CHUNKS[0])
+        _send_stream_chunk(ws, client_event_id, 1, b'Z' * 4800)
+        _send_stream_chunk(ws, client_event_id, 2, STREAMING_STT_CHUNKS[1])
+        _send_stream_chunk(ws, client_event_id, 3, STREAMING_STT_CHUNKS[2])
+        _send_stream_commit(ws, client_event_id, 3, 6000)
+
+        assert ws.receive_json()['type'] == 'you'
+        while ws.receive_json()['type'] != 'done':
+            pass
+
+    assert len(provider.turns) == 1
+    assert provider.turns[0].appended == list(STREAMING_STT_CHUNKS)
+    assert provider.turns[0].finish_calls == 1
+
+
+def test_ws_streaming_stt_gap_rejects_and_cancels_hold(tmp_path):
+    event_path = tmp_path / 'events.jsonl'
+    recorder = JsonlEventRecorder(event_path)
+    provider = FakeStreamingSTTClient()
+    app = create_app(
+        FakeStream(),
+        streaming_stt_client=provider,
+        event_recorder=recorder,
+        radio_sec=100,
+    )
+    client_event_id = 'stream-gap-1'
+
+    with TestClient(app).websocket_connect('/ws') as ws:
+        _start_session(ws)
+        _send_hold(ws, client_event_id)
+        _send_stream_start(ws, client_event_id)
+        assert provider.started.wait(timeout=1)
+        _send_stream_chunk(ws, client_event_id, 1, STREAMING_STT_CHUNKS[0])
+        _send_stream_chunk(ws, client_event_id, 3, STREAMING_STT_CHUNKS[1])
+
+        assert ws.receive_json() == {
+            'type': 'stt_error',
+            'client_event_id': client_event_id,
+            'code': 'chunk_sequence',
+        }
+        recorder.flush()
+        events = _read_events(event_path)
+        assert any(
+            event['event'] == EventName.HOLD_CANCELLED
+            and event['client_event_id'] == client_event_id
+            for event in events
+        )
+        assert any(
+            event['event'] == EventName.STT_COMPLETED
+            and event['client_event_id'] == client_event_id
+            and event['outcome'] == 'error'
+            for event in events
+        )
+
+    assert len(provider.turns) == 1
+    assert provider.turns[0].cancel_calls == 1
+    assert provider.turns[0].finish_calls == 0
+
+
+def test_ws_streaming_stt_malformed_commit_fails_immediately():
+    provider = FakeStreamingSTTClient()
+    app = create_app(
+        FakeStream(),
+        streaming_stt_client=provider,
+        radio_sec=100,
+    )
+    client_event_id = 'stream-invalid-commit-1'
+
+    with TestClient(app).websocket_connect('/ws') as ws:
+        _start_session(ws)
+        _send_hold(ws, client_event_id)
+        _send_stream_start(ws, client_event_id)
+        assert provider.started.wait(timeout=1)
+        ws.send_text(
+            json.dumps(
+                {
+                    'type': 'voice_stream_commit',
+                    'client_event_id': client_event_id,
+                    'final_sequence_number': 'invalid',
+                    'total_samples': 6000,
+                }
+            )
+        )
+
+        assert ws.receive_json() == {
+            'type': 'stt_error',
+            'client_event_id': client_event_id,
+            'code': 'invalid_stream',
+        }
+
+    assert len(provider.turns) == 1
+    assert provider.turns[0].cancel_calls == 1
+
+
+def test_ws_hold_off_cancels_pending_stream_start(tmp_path):
+    event_path = tmp_path / 'events.jsonl'
+    recorder = JsonlEventRecorder(event_path)
+    provider = FakeStreamingSTTClient(pending=True)
+    app = create_app(
+        FakeStream(),
+        streaming_stt_client=provider,
+        event_recorder=recorder,
+        max_turns=1,
+        radio_sec=100,
+    )
+    client_event_id = 'stream-hold-off-1'
+
+    with TestClient(app).websocket_connect('/ws') as ws:
+        _start_session(ws)
+        _send_hold(ws, client_event_id)
+        _send_stream_start(ws, client_event_id)
+        assert provider.started.wait(timeout=1)
+        ws.send_text(
+            json.dumps(
+                {
+                    'type': 'hold_off',
+                    'client_event_id': client_event_id,
+                }
+            )
+        )
+        assert provider.start_cancelled.wait(timeout=1)
+
+        ws.send_text(json.dumps({'type': 'say', 'text': '취소 후 입력'}))
+        assert ws.receive_json()['type'] == 'start'
+        while ws.receive_json()['type'] != 'done':
+            pass
+
+    provider.release.set()
+    assert provider.turns == []
+    events = _read_events(event_path)
+    completed = [
+        event
+        for event in events
+        if event['event'] == EventName.STT_COMPLETED
+        and event['client_event_id'] == client_event_id
+    ]
+    cancelled_holds = [
+        event
+        for event in events
+        if event['event'] == EventName.HOLD_CANCELLED
+        and event['client_event_id'] == client_event_id
+    ]
+    assert [event['outcome'] for event in completed] == ['cancelled']
+    assert len(cancelled_holds) == 1
+
+
+def test_ws_streaming_stt_append_timeout_releases_input(monkeypatch):
+    import api.app as app_module
+
+    monkeypatch.setattr(app_module, 'STREAM_STT_APPEND_SEC', 0.01)
+    append_started = threading.Event()
+
+    class HangingAppendTurn(FakeStreamingSTTTurn):
+        async def append(self, audio):
+            self.appended.append(audio)
+            append_started.set()
+            await asyncio.Event().wait()
+
+    class HangingAppendProvider:
+        def __init__(self):
+            self.turn = None
+
+        async def start(self, *, on_delta):
+            self.turn = HangingAppendTurn('사용되지 않음', on_delta)
+            return self.turn
+
+    provider = HangingAppendProvider()
+    app = create_app(
+        FakeStream(),
+        streaming_stt_client=provider,
+        max_turns=1,
+        radio_sec=100,
+    )
+    client_event_id = 'stream-append-timeout-1'
+
+    with TestClient(app).websocket_connect('/ws') as ws:
+        _start_session(ws)
+        _send_hold(ws, client_event_id)
+        _send_stream_start(ws, client_event_id)
+        for sequence_number, audio in enumerate(STREAMING_STT_CHUNKS, start=1):
+            _send_stream_chunk(ws, client_event_id, sequence_number, audio)
+        _send_stream_commit(ws, client_event_id, 3, 6000)
+
+        assert ws.receive_json() == {
+            'type': 'stt_error',
+            'client_event_id': client_event_id,
+            'code': 'provider_unavailable',
+        }
+
+    assert append_started.is_set()
+    assert provider.turn.cancel_calls == 1
 
 
 def test_ws_prefetch_serves_next_turn_without_tokens():

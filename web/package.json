@@ -1,0 +1,13 @@
+{
+  "name": "banter-web",
+  "private": true,
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "prepare:vad": "node scripts/prepare-vad-assets.mjs",
+    "eval:vad": "node scripts/evaluate-vad.mjs"
+  },
+  "dependencies": {
+    "@ricky0123/vad-web": "0.0.30",
+    "onnxruntime-web": "1.22.0"
+  }
+}

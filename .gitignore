@@ -16,6 +16,7 @@ venv/
 
 # Node / web
 node_modules/
+web/vendor/vad/
 .next/
 dist/
 build/
@@ -25,6 +26,7 @@ build/
 coverage/
 *.log
 artifacts/runs/
+artifacts/vad-eval/
 server/artifacts/runs/
 
 # OS·에디터

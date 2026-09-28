@@ -3,54 +3,165 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>banter</title>
+    <meta name="theme-color" content="#f8faf9" />
+    <title>banter · 함께하는 대화</title>
     <style>
-      :root { color-scheme: light dark; }
+      :root {
+        color-scheme: light;
+        --paper: #f8faf9; --ink: #243b37; --muted: #65776d;
+        --line: #e4eae7; --green: #326957; --soft-green: #eaf2ed;
+      }
+      * { box-sizing: border-box; }
+      [hidden] { display: none !important; }
       body {
-        margin: 0 auto;
-        font-family: system-ui, sans-serif;
-        display: flex;
-        flex-direction: column;
-        height: 100vh;
-        max-width: 640px;
+        margin: 0; min-height: 100vh; min-height: 100dvh; background: var(--paper);
+        color: var(--ink); font-family: -apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', 'Noto Sans KR', sans-serif;
+        -webkit-font-smoothing: antialiased;
       }
-      header { padding: 12px 16px; font-weight: 600; border-bottom: 1px solid #8883; }
-      #session-panel {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 12px;
-        padding: 10px 16px;
-        border-bottom: 1px solid #8883;
+      button, input, summary { font: inherit; }
+      button, summary { -webkit-tap-highlight-color: transparent; }
+      button { cursor: pointer; }
+      button:disabled { cursor: default; opacity: .55; }
+      :focus-visible { outline: 3px solid #6e9686; outline-offset: 5px; }
+      .app { width: min(100%, 900px); min-height: 100vh; min-height: 100dvh; margin: auto; display: flex; flex-direction: column; }
+      .topbar { display: flex; align-items: center; justify-content: space-between; padding: 30px 42px; }
+      .brand { font-size: 27px; font-weight: 760; letter-spacing: -1.5px; }
+      .brand-dot { display: inline-block; width: 6px; height: 6px; background: #75a48e; border-radius: 50%; margin-left: 3px; }
+      .session-badge { display: inline-flex; align-items: center; gap: 7px; padding: 8px 11px; border: 1px solid var(--line); border-radius: 20px; font-size: 12px; color: #63766e; }
+      .session-badge::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: #a5b1ab; }
+      body[data-session='running'] .session-badge::before { background: #4c896f; }
+      .room { flex: 1; display: flex; flex-direction: column; align-items: center; padding: 34px 28px 22px; }
+      .room-heading { text-align: center; }
+      .eyebrow { margin: 0 0 13px; color: #6c7e74; font-size: 11px; letter-spacing: 2.6px; font-weight: 600; }
+      h1 { margin: 0; font-size: clamp(25px, 4vw, 33px); line-height: 1.45; font-weight: 650; letter-spacing: -1.3px; word-break: keep-all; }
+      #room-description { margin: 11px 0 0; color: var(--muted); font-size: 14px; line-height: 1.7; word-break: keep-all; }
+      .participants { display: flex; justify-content: center; gap: clamp(36px, 9vw, 92px); margin: 53px 0 29px; }
+      .person { width: 155px; text-align: center; --person-color: #6d8d9b; --person-bg: #e8f0f3; --person-soft: #f0f5f7; }
+      .person.so-eun { --person-color: #b18d71; --person-bg: #f4ebe2; --person-soft: #f9f4ee; }
+      .portrait-wrap { width: 126px; height: 126px; margin: 0 auto; padding: 7px; border: 1px solid transparent; border-radius: 50%; transition: border-color .25s, background .25s; }
+      .portrait { position: relative; display: grid; place-items: center; width: 110px; height: 110px; border-radius: 50%; background: var(--person-bg); color: var(--person-color); }
+      .portrait svg { width: 78px; height: 78px; }
+      .person h2 { margin: 18px 0 0; font-size: 17px; font-weight: 650; letter-spacing: -.4px; }
+      .person-status { min-height: 21px; margin: 7px 0 0; color: var(--muted); font-size: 12px; line-height: 21px; }
+      .voice-bars { height: 18px; margin-top: 11px; display: flex; align-items: center; justify-content: center; gap: 3px; color: var(--person-color); opacity: .32; }
+      .voice-bars i { display: block; width: 3px; height: 3px; border-radius: 3px; background: currentColor; }
+      .person[data-state='speaking'] .portrait-wrap { border-color: var(--person-color); background: var(--person-soft); }
+      .person[data-state='speaking'] .person-status { color: var(--ink); }
+      .person[data-state='speaking'] .voice-bars { opacity: 1; }
+      .person[data-state='speaking'] .voice-bars i { height: 13px; animation: voice 1s ease-in-out infinite alternate; }
+      .person[data-state='speaking'] .voice-bars i:nth-child(2n) { height: 6px; animation-delay: -.35s; }
+      .person[data-state='speaking'] .voice-bars i:nth-child(3n) { height: 18px; animation-delay: -.65s; }
+      @keyframes voice { to { transform: scaleY(.35); } }
+      #session-panel { width: min(100%, 530px); min-height: 49px; display: grid; place-items: center; text-align: center; }
+      #session-status { margin: 0; color: #6c7e74; font-size: 13px; line-height: 1.7; word-break: keep-all; }
+      body[data-session='error'] #session-status { color: #9a544d; }
+      .controls { width: min(100%, 520px); margin: 9px auto 0; padding: 0 24px 30px; padding-bottom: max(30px, env(safe-area-inset-bottom)); text-align: center; }
+      #session-start { min-width: 204px; min-height: 52px; padding: 14px 30px; border: 0; border-radius: 30px; background: var(--green); color: #fff; font-size: 14px; font-weight: 600; transition: background .2s; }
+      #session-start:hover:enabled { background: #245542; }
+      #mic-control { padding-top: 3px; }
+      #input-mode { display: inline-block; margin-bottom: 21px; color: #63776b; font-size: 11px; letter-spacing: .4px; }
+      #mic { position: relative; display: block; width: 80px; height: 80px; margin: 0 auto; border: 1px solid #dae5df; border-radius: 50%; background: #fff; color: var(--green); font-size: 0; touch-action: none; user-select: none; -webkit-user-select: none; transition: background .2s, box-shadow .2s, transform .2s; box-shadow: 0 5px 17px #274b3710; }
+      #mic::before { content: ''; position: absolute; inset: 24px; background: currentColor; mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cg fill='none' stroke='black' stroke-width='1.65' stroke-linecap='round'%3E%3Crect x='8.5' y='2' width='7' height='12' rx='3.5'/%3E%3Cpath d='M5.5 10v1.5a6.5 6.5 0 0 0 13 0V10M12 18v4M8.5 22h7'/%3E%3C/g%3E%3C/svg%3E") center / contain no-repeat; }
+      #mic:hover:enabled { transform: translateY(-2px); box-shadow: 0 7px 22px #274b3720; }
+      #mic.listening { background: var(--soft-green); border-color: #b7d0c0; }
+      #mic.rec { background: var(--green); border-color: var(--green); color: #fff; box-shadow: 0 0 0 7px #32695712, 0 5px 17px #274b3710; }
+      #mic-action { margin: 15px 0 0; font-size: 13px; font-weight: 600; }
+      #mic-state { display: block; margin: 5px 0 0; min-height: 19px; color: var(--muted); font-size: 12px; line-height: 19px; }
+      #mic-control[data-state='recording'] #mic-state { color: var(--green); }
+      #input-hint { min-height: 19px; margin: 13px 0 0; font-size: 11px; line-height: 1.7; color: #63776b; word-break: keep-all; }
+      #text-entry { margin-top: 25px; border-top: 1px solid var(--line); padding-top: 17px; }
+      summary { display: inline-block; color: #63776b; font-size: 12px; cursor: pointer; padding: 8px; list-style: none; }
+      summary::-webkit-details-marker { display: none; }
+      summary::after { content: ''; display: inline-block; width: 5px; height: 5px; margin: 0 0 2px 9px; border-right: 1px solid currentColor; border-bottom: 1px solid currentColor; transform: rotate(45deg); }
+      details[open] summary::after { transform: rotate(225deg); margin-bottom: -1px; }
+      form { display: flex; gap: 8px; margin-top: 10px; }
+      input { min-width: 0; flex: 1; padding: 13px 14px; border-radius: 13px; border: 1px solid var(--line); background: #fff; color: var(--ink); font-size: 16px; }
+      input::placeholder { color: #687b6f; font-size: 13px; }
+      #send { flex: none; min-height: 46px; padding: 11px 16px; border: 0; border-radius: 13px; background: var(--green); color: #fff; font-size: 13px; }
+      #conversation-details { width: min(100%, 530px); margin-top: 12px; text-align: center; }
+      #log { max-height: 260px; overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 8px; text-align: left; }
+      .msg { padding: 10px 13px; border-radius: 12px; max-width: 88%; line-height: 1.6; font-size: 14px; overflow-wrap: anywhere; }
+      .user { align-self: flex-end; background: var(--soft-green); }
+      .ai_a, .ai_b { align-self: flex-start; background: #edf1f2; }
+      .ai_b { background: #f4eee7; }
+      .name { font-size: 11px; color: #78867e; margin-bottom: 3px; }
+      #soundhint { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); width: min(430px, calc(100% - 32px)); z-index: 2; padding: 11px 15px; border: 1px solid #bbd0c3; border-radius: 12px; background: var(--soft-green); color: var(--green); text-align: center; font-size: 13px; }
+      .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+      @media (max-width: 540px) {
+        .topbar { padding: 23px 23px; } .brand { font-size: 25px; }
+        .room { padding: 30px 20px 14px; }
+        .participants { gap: 26px; margin: 39px 0 20px; }
+        .person { width: 137px; }
+        .controls { padding-left: 24px; padding-right: 24px; }
       }
-      #session-status { margin: 0; font-size: 14px; opacity: 0.75; }
-      #log { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 8px; }
-      .msg { padding: 8px 12px; border-radius: 12px; max-width: 80%; line-height: 1.4; }
-      .user { align-self: flex-end; background: #2563eb; color: #fff; }
-      .ai_a { align-self: flex-start; background: #8882; }
-      .ai_b { align-self: flex-start; background: #10b98133; }
-      .name { font-size: 11px; opacity: 0.6; margin-bottom: 2px; }
-      form { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid #8883; }
-      input { flex: 1; padding: 10px; border-radius: 8px; border: 1px solid #8886; font-size: 15px; }
-      button { padding: 10px 16px; border: 0; border-radius: 8px; background: #2563eb; color: #fff; font-size: 15px; }
-      button:disabled { cursor: not-allowed; opacity: 0.5; }
-      #session-start { flex: none; }
-      #mic { background: #8884; }
-      #mic.rec { background: #dc2626; }
+      @media (max-height: 730px) {
+        .room { padding-top: 12px; } .participants { margin-top: 24px; margin-bottom: 14px; }
+        .portrait-wrap { width: 108px; height: 108px; } .portrait { width: 92px; height: 92px; }
+        .portrait svg { width: 65px; height: 65px; } .person h2 { margin-top: 10px; }
+        #mic { width: 70px; height: 70px; } #mic::before { inset: 21px; }
+        #input-mode { margin-bottom: 12px; } #text-entry { margin-top: 18px; }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after { animation: none !important; transition: none !important; }
+      }
     </style>
   </head>
-  <body>
-    <header>banter: 도현, 소은과 수다</header>
-    <section id="session-panel" aria-label="대화 상태">
-      <p id="session-status" role="status" aria-live="polite">준비되면 대화를 시작하세요.</p>
-      <button type="button" id="session-start">대화 시작</button>
-    </section>
-    <div id="log"></div>
-    <form id="form">
-      <button type="button" id="mic" hidden disabled title="누르는 동안 녹음돼요" aria-label="누르는 동안 녹음" aria-pressed="false">말하기</button>
-      <input id="msg" autocomplete="off" placeholder="대화를 시작해 주세요." disabled />
-      <button id="send" disabled>전송</button>
-    </form>
+  <body data-session="idle">
+    <div class="app">
+      <header class="topbar">
+        <span class="brand" aria-label="banter">banter<span class="brand-dot" aria-hidden="true"></span></span>
+        <span id="session-label" class="session-badge">시작 전</span>
+      </header>
+      <main class="room">
+        <div class="room-heading">
+          <p class="eyebrow">두 AI와 함께하는 대화</p>
+          <h1 id="room-title">듣다가, 편하게 끼어들어요.</h1>
+          <p id="room-description">도현과 소은의 수다에 함께해요.</p>
+        </div>
+        <section class="participants" aria-label="AI 참여자">
+          <article id="person-ai_a" class="person do-hyun" data-state="idle" aria-label="도현">
+            <div class="portrait-wrap"><div class="portrait" aria-hidden="true">
+              <svg viewBox="0 0 100 100" fill="none"><path d="M19 94c0-21 13-34 31-34s31 13 31 34" fill="currentColor" opacity=".7"/><ellipse cx="50" cy="40" rx="21" ry="23" fill="currentColor"/><path d="M32 30c2-12 12-16 22-13 9 2 16 10 16 21-7-1-16-8-21-13-3 5-9 8-17 9" fill="#486573"/><path d="M43 44h1m12 0h1" stroke="white" stroke-width="3" stroke-linecap="round"/><path d="M45 53c3 2 7 2 10 0" stroke="white" stroke-width="2" stroke-linecap="round"/></svg>
+            </div></div>
+            <h2>도현</h2><p id="person-status-ai_a" class="person-status">함께할 준비가 됐어요</p>
+            <div class="voice-bars" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
+          </article>
+          <article id="person-ai_b" class="person so-eun" data-state="idle" aria-label="소은">
+            <div class="portrait-wrap"><div class="portrait" aria-hidden="true">
+              <svg viewBox="0 0 100 100" fill="none"><path d="M25 43c0-20 9-29 25-29s25 9 25 29v30H25z" fill="#947760"/><path d="M18 94c2-21 14-32 32-32s30 11 32 32" fill="currentColor" opacity=".7"/><ellipse cx="50" cy="41" rx="20" ry="24" fill="currentColor"/><path d="M29 36c1-15 9-22 22-21 13 1 22 10 21 24-10-2-15-10-20-16-3 8-13 13-23 13" fill="#947760"/><path d="M42 44h1m13 0h1" stroke="white" stroke-width="3" stroke-linecap="round"/><path d="M45 54c3 2 7 2 10 0" stroke="white" stroke-width="2" stroke-linecap="round"/></svg>
+            </div></div>
+            <h2>소은</h2><p id="person-status-ai_b" class="person-status">함께할 준비가 됐어요</p>
+            <div class="voice-bars" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
+          </article>
+        </section>
+        <section id="session-panel" aria-label="대화 상태">
+          <p id="session-status" role="status" aria-live="polite">준비되면 대화를 시작하세요.</p>
+        </section>
+        <details id="conversation-details" hidden>
+          <summary>대화 기록</summary>
+          <div id="log" role="log" aria-label="대화 기록" aria-live="polite"></div>
+        </details>
+      </main>
+      <footer class="controls">
+        <button type="button" id="session-start">대화 시작</button>
+        <div id="mic-control" hidden data-state="off">
+          <span id="input-mode">자동 참여</span>
+          <button type="button" id="mic" hidden disabled title="누르는 동안 녹음돼요" aria-label="누르는 동안 녹음" aria-describedby="input-hint" aria-pressed="false">말하기</button>
+          <p id="mic-action">마이크 켜기</p>
+          <span id="mic-state" role="status" aria-live="polite">마이크 꺼짐</span>
+        </div>
+        <p id="input-hint">자동 참여 모드에서는 대화 시작 시 마이크를 준비해요.</p>
+        <details id="text-entry" hidden>
+          <summary>텍스트로 참여</summary>
+          <form id="form">
+            <label for="msg" class="sr-only">대화에 보낼 말</label>
+            <input id="msg" autocomplete="off" placeholder="대화를 시작해 주세요." disabled />
+            <button id="send" disabled>보내기</button>
+          </form>
+        </details>
+      </footer>
+    </div>
+    <script src="/vad-capture.js"></script>
     <script>
       const NAMES = { user: '나', ai_a: '도현', ai_b: '소은' };
       const log = document.getElementById('log');
@@ -60,23 +171,98 @@
       const input = document.getElementById('msg');
       const sendBtn = document.getElementById('send');
       const micBtn = document.getElementById('mic');
+      const sessionLabel = document.getElementById('session-label');
+      const roomTitle = document.getElementById('room-title');
+      const roomDescription = document.getElementById('room-description');
+      const micControl = document.getElementById('mic-control');
+      const micStateLabel = document.getElementById('mic-state');
+      const micAction = document.getElementById('mic-action');
+      const inputMode = document.getElementById('input-mode');
+      const inputHint = document.getElementById('input-hint');
+      const textEntry = document.getElementById('text-entry');
+      const conversationDetails = document.getElementById('conversation-details');
       let ws = null;
       let sessionState = 'idle';
       let connectionEpoch = 0;
       let voiceMode = false;
+      let audioTextFallback = false;
       let sttAvailable = false;
+      let sttStreamConfig = null;
+      let vadMode = false;
+      let vadListener = null;
       let current = null;
       let pendingStt = null;
       let voiceRequestClientEventId = null;
+      let voiceRequestReleasedAt = null;
       let activeSessionId = null;
       let clientEventSequence = 0;
       let activeHoldEventId = null;
       let suppressAudioUntilNextTurn = false;
       let audioSuppressionClientEventId = null;
 
-      function setSessionState(next, message) {
-        sessionState = next;
+      function setStatus(message) {
         statusEl.textContent = message;
+        syncUi();
+      }
+
+      function syncUi() {
+        const running = sessionState === 'running';
+        const preparingVad = sessionState === 'starting' && vadMode && vadListener !== null;
+        const audible = playing && playbackStarted && currentItem?.audio && !player.paused
+          ? currentItem.speaker : null;
+        document.body.setAttribute('data-session', sessionState);
+        sessionLabel.textContent = { idle: '시작 전', starting: '연결 중', running: '대화 중',
+          ended: audible ? '마지막 이야기' : '대화 종료', error: '연결 확인' }[sessionState];
+        roomTitle.textContent = { idle: '듣다가, 편하게 끼어들어요.', starting: '대화를 준비하고 있어요.',
+          running: '지금, 함께 이야기하는 중.', ended: audible ? '마지막 이야기를 듣고 있어요.' : '다음 이야기도 함께해요.',
+          error: '잠시 연결을 확인해 주세요.' }[sessionState];
+        roomDescription.textContent = running
+          ? '편하게 듣고, 하고 싶은 말이 생기면 참여해요.'
+          : sessionState === 'ended' ? '도현과 소은은 여기에서 기다릴게요.' : '도현과 소은의 수다에 함께해요.';
+        for (const speaker of ['ai_a', 'ai_b']) {
+          const state = audible === speaker ? 'speaking'
+            : !voiceMode && current?.speaker === speaker ? 'thinking' : 'idle';
+          const description = state === 'speaking' ? '말하는 중'
+            : state === 'thinking' ? '응답을 준비하는 중'
+            : running || audible ? '듣고 있어요' : '함께할 준비가 됐어요';
+          const person = document.getElementById('person-' + speaker);
+          person.setAttribute('data-state', state);
+          person.setAttribute('aria-label', NAMES[speaker] + ', ' + description);
+          document.getElementById('person-status-' + speaker).textContent = description;
+        }
+        let micState = 'off';
+        if (preparingVad) micState = 'preparing';
+        if (running) {
+          if (!sttAvailable) micState = 'unavailable';
+          else if (pendingStt || voiceRequestClientEventId || pcmCapture?.finishing) micState = 'processing';
+          else if ((pcmCapture && !pcmCapture.ended) || recorder?.state === 'recording') micState = 'recording';
+          else if (vadListener) micState = vadListener.ready ? 'listening' : 'preparing';
+          else if (pressHeld) micState = 'preparing';
+          else if (!vadMode) micState = 'ready';
+        }
+        micControl.hidden = (!running && !preparingVad) || !sttAvailable;
+        micBtn.hidden = micControl.hidden;
+        micBtn.disabled = micControl.hidden;
+        micControl.setAttribute('data-state', micState);
+        micStateLabel.textContent = { off: '마이크 꺼짐', unavailable: '음성 입력을 사용할 수 없어요',
+          preparing: '마이크 준비 중', recording: vadMode ? '말씀 듣는 중' : '녹음 중',
+          processing: '음성 확인 중', listening: '말씀을 기다리고 있어요', ready: '누르는 동안만 녹음돼요' }[micState];
+        micAction.textContent = vadMode ? micBtn.textContent : '누르고 말하기';
+        inputMode.textContent = vadMode ? '자동 참여' : '눌러 말하기';
+        inputHint.textContent = !running ? '자동 참여 모드에서는 대화 시작 시 마이크를 준비해요.'
+          : !sttAvailable ? '텍스트로 대화에 참여할 수 있어요.'
+          : vadMode ? '한 번 켜면, 말이 끝날 때 자동으로 전송돼요.'
+          : '누르는 동안 말하고, 손을 떼면 전송돼요.';
+        startBtn.hidden = running || preparingVad;
+        textEntry.hidden = !running;
+        conversationDetails.hidden = (voiceMode && !audioTextFallback)
+          || !['running', 'ended'].includes(sessionState);
+      }
+
+      function setSessionState(next, message) {
+        const previous = sessionState;
+        sessionState = next;
+        setStatus(message);
         const running = next === 'running';
         input.disabled = !running;
         sendBtn.disabled = !running;
@@ -85,13 +271,40 @@
         startBtn.disabled = next === 'starting' || running;
         startBtn.textContent = next === 'ended' || next === 'error' ? '다시 시작' : '대화 시작';
         input.placeholder = running ? '말 걸거나 끼어들어보세요…' : '대화를 시작해 주세요.';
-        if (running) input.focus();
+        if (previous !== next) {
+          textEntry.open = running && !voiceMode;
+          conversationDetails.open = !voiceMode;
+        }
+        updateMicControl();
+        if (running && !voiceMode) input.focus();
+      }
+
+      function updateMicControl() {
+        if (!vadMode) {
+          micBtn.textContent = '말하기';
+          micBtn.setAttribute('aria-label', '누르는 동안 녹음');
+          micBtn.setAttribute('title', '누르는 동안 녹음돼요');
+          micBtn.classList.remove('listening');
+          syncUi();
+          return;
+        }
+        const listening = vadListener !== null;
+        micBtn.textContent = sessionState === 'starting' && listening ? '준비 취소'
+          : listening ? '마이크 끄기' : '마이크 켜기';
+        micBtn.setAttribute('aria-label', micBtn.textContent);
+        micBtn.setAttribute('title', '마이크를 켜면 말할 때 자동으로 참여해요');
+        micBtn.setAttribute('aria-pressed', String(listening));
+        if (listening && vadListener.ready) micBtn.classList.add('listening');
+        else micBtn.classList.remove('listening');
+        syncUi();
       }
 
       function safeSend(payload, socket = ws) {
         if (socket && socket.readyState === WebSocket.OPEN) {
-          socket.send(JSON.stringify(payload));
-          return true;
+          try {
+            socket.send(JSON.stringify(payload));
+            return true;
+          } catch (_) {}
         }
         return false;
       }
@@ -101,6 +314,8 @@
         if (pendingStt) pendingStt.wrap.remove();
         pendingStt = null;
         voiceRequestClientEventId = null;
+        voiceRequestReleasedAt = null;
+        syncUi();
         return true;
       }
 
@@ -161,13 +376,19 @@
           el = document.createElement('div');
           el.id = 'soundhint';
           el.textContent = '화면을 한 번 탭하면 목소리가 재생돼요';
-          el.style.cssText = 'position:fixed;top:8px;left:50%;transform:translateX(-50%);background:#2563eb;color:#fff;padding:8px 14px;border-radius:8px;font-size:13px;z-index:9';
+          el.setAttribute('role', 'status');
           document.body.append(el);
         }
       }
       function hideSoundHint() {
         const el = document.getElementById('soundhint');
         if (el) el.remove();
+      }
+
+      function showAudioTextFallback() {
+        audioTextFallback = true;
+        conversationDetails.open = true;
+        setStatus('목소리를 재생하지 못했어요. 대화 기록으로 확인할 수 있어요.');
       }
 
       // 음성 동기 모드: 말풍선은 그 발화의 오디오가 "재생되는 순간" 표시한다(자막).
@@ -185,11 +406,12 @@
       function playNext() {
         currentItem = null;
         playbackStarted = false;
-        if (!audioQueue.length) { playing = false; return; }
+        if (!audioQueue.length) { playing = false; syncUi(); return; }
         playing = true;
         const item = audioQueue.shift();
         if (item.seq <= flushUpTo) { ack(item.seq); playNext(); return; }
         currentItem = item;
+        syncUi();
         const gen = generation;
         let finished = false;
         const finish = () => {
@@ -199,26 +421,35 @@
           playNext();
         };
         if (!item.audio) { // 합성 실패 → 자막만 표시하고 즉시 다음
+          if (voiceMode) showAudioTextFallback();
           showSentence(item);
           finish();
           return;
         }
         player.src = 'data:audio/mpeg;base64,' + item.audio;
         player.onended = finish;
-        player.onerror = finish;
+        player.onerror = () => {
+          if (gen !== generation || finished) return;
+          showAudioTextFallback();
+          if (!playbackStarted) showSentence(item);
+          finish();
+        };
         player.play().then(() => {
           if (gen !== generation || finished) return;
           playbackStarted = true;
           showSentence(item); // 재생 성공 순간 자막 표시 (문장 단위)
+          syncUi();
         }).catch((err) => {
           if (gen !== generation || finished) return;
           if (err && err.name === 'NotAllowedError' && !unlocked) {
             // 아직 제스처 전 — 항목을 되돌리고 안내. ack하지 않는다(서버가 기다려줌)
             audioQueue.unshift(item);
             playing = false;
+            syncUi();
             showSoundHint();
             return;
           }
+          showAudioTextFallback();
           showSentence(item); // 기타 재생 실패 → 자막만
           finish();
         });
@@ -265,11 +496,13 @@
         if (interruptedItem && interruptedItem.seq) {
           audioStop.segment_id = 'audio-' + interruptedItem.seq;
         }
+        syncUi();
         return { audioStop, maxSeq };
       }
 
       function resetPresentation(clearLog) {
         cleanupRecording();
+        disposePreparedPcmContext();
         generation += 1;
         player.pause();
         player.removeAttribute('src');
@@ -281,6 +514,7 @@
         flushUpTo = 0;
         current = null;
         lastAi = null;
+        audioTextFallback = false;
         activeSessionId = null;
         clientEventSequence = 0;
         activeHoldEventId = null;
@@ -289,28 +523,98 @@
         if (pendingStt) pendingStt.wrap.remove();
         pendingStt = null;
         if (clearLog) log.replaceChildren();
+        syncUi();
+      }
+
+      let sessionHelloReceived = false;
+      let sessionStartRequested = false;
+
+      function failSessionPreparation(socket, message) {
+        if (socket !== ws || sessionState !== 'starting') return;
+        ws = null;
+        resetPresentation(false);
+        socket.close(1000);
+        setSessionState('error', message);
+      }
+
+      async function prepareSession(socket, epoch) {
+        if (vadMode) {
+          if (!sttAvailable) {
+            failSessionPreparation(socket, '자동 음성 입력을 준비할 수 없어요. 서버 설정을 확인해 주세요.');
+            return;
+          }
+          if (!(await startVadListening())) return;
+        }
+        if (socket !== ws || epoch !== connectionEpoch || sessionState !== 'starting') return;
+        sessionStartRequested = true;
+        if (!safeSend({ type: 'session_start' }, socket)) {
+          failSessionPreparation(socket, '대화를 시작하지 못했어요. 다시 시도해 주세요.');
+        }
       }
 
       function handleMessage(d, socket, epoch) {
         if (socket !== ws || epoch !== connectionEpoch) return;
         if (d.type === 'hello') {
+          if (sessionHelloReceived) return;
+          sessionHelloReceived = true;
           voiceMode = d.voice; // 음성 모드면 토큰 라이브 표시 대신 오디오 동기 표시
-          sttAvailable = d.stt;
+          const offered = d.stt_stream;
+          sttStreamConfig = offered
+            && offered.encoding === 'pcm_s16le'
+            && offered.sample_rate_hz === 24000
+            && offered.channels === 1
+            && offered.chunk_samples === 2400
+            ? offered : null;
+          sttAvailable = d.stt === true || sttStreamConfig !== null;
+          vadMode = d.interaction_mode === 'vad';
+          if (vadMode) {
+            sttAvailable = sttStreamConfig !== null && d.vad?.engine === 'silero_v5';
+          }
+          if (!sttStreamConfig) disposePreparedPcmContext();
           setSessionState('starting', '세션을 준비하고 있어요…');
-          safeSend({ type: 'session_start' }, socket);
+          void prepareSession(socket, epoch);
         } else if (d.type === 'session_started') {
+          if (!sessionStartRequested || sessionState !== 'starting') return;
+          if (vadListener?.preSessionSpeech) vadListener.controller.reset();
           activeSessionId = String(d.session_id || ('connection-' + epoch));
           clientEventSequence = 0;
           activeHoldEventId = null;
-          setSessionState('running', '대화 중, 언제든 끼어들 수 있어요.');
+          setSessionState('running', vadMode
+            ? '마이크가 켜져 있어요. 말하면 대화에 참여해요.'
+            : '대화 중, 언제든 끼어들 수 있어요.');
         } else if (d.type === 'you') {
+          if (d.client_event_id && d.client_event_id !== voiceRequestClientEventId) return;
+          const observedClientEventId = d.client_event_id || voiceRequestClientEventId;
+          const observedAt = performance.now();
+          const releasedAt = voiceRequestReleasedAt;
           if (pendingStt) { // '듣는 중…' 자리에 전사 결과 채움
             pendingStt.body.textContent = d.text;
             pendingStt = null;
           } else {
             add('user', d.text);
           }
+          if (observedClientEventId && Number.isFinite(releasedAt)) {
+            safeSend({
+              type: 'stt_observed',
+              client_event_id: observedClientEventId,
+              milestone: 'final',
+              elapsed_ms: Math.round(Math.max(0, observedAt - releasedAt) * 1000) / 1000,
+            }, socket);
+          }
           voiceRequestClientEventId = null;
+          voiceRequestReleasedAt = null;
+          setStatus('대화 중, 언제든 끼어들 수 있어요.');
+        } else if (d.type === 'stt_error') {
+          if (d.client_event_id
+            && d.client_event_id !== voiceRequestClientEventId
+            && d.client_event_id !== activeHoldEventId) return;
+          if (vadMode) cancelVadSpeech(false, { resetIdle: false });
+          else cleanupRecording();
+          setStatus(d.code === 'too_short'
+            ? '조금 더 길게 말해 주세요.'
+            : d.code === 'provider_unavailable'
+              ? '음성 인식 연결에 문제가 생겼어요. 다시 말해 주세요.'
+              : '음성을 알아듣지 못했어요. 다시 시도해 주세요.');
         } else if (d.type === 'start') {
           if (d.after_client_event_id === voiceRequestClientEventId) {
             clearVoiceRequest(voiceRequestClientEventId);
@@ -320,6 +624,7 @@
             || d.after_client_event_id === audioSuppressionClientEventId;
           if (!mayResumeAudio) {
             current = null;
+            syncUi();
             return;
           }
           if (suppressAudioUntilNextTurn) {
@@ -353,20 +658,27 @@
           // done은 합성과 전송이 끝났다는 뜻이며 브라우저 재생 완료는 아니다.
           // 마지막 음성을 자르지 않고, 다시 시작할 때만 오디오를 정리한다.
           cleanupRecording();
+          disposePreparedPcmContext();
           setSessionState('ended', '대화가 끝났어요. 같은 화면에서 다시 시작할 수 있어요.');
           startBtn.focus();
           socket.close(1000);
         }
+        syncUi();
       }
 
       async function startSession() {
         if (!['idle', 'ended', 'error'].includes(sessionState)) return;
         const epoch = ++connectionEpoch;
+        sessionHelloReceived = false;
+        sessionStartRequested = false;
         const previous = ws;
         ws = null;
         if (previous && previous.readyState < WebSocket.CLOSING) previous.close(1000);
         resetPresentation(true);
+        preparePcmContext();
         sttAvailable = false;
+        sttStreamConfig = null;
+        vadMode = false;
         voiceMode = false;
         setSessionState('starting', '오디오를 준비하고 있어요…');
 
@@ -407,11 +719,16 @@
 
       startBtn.addEventListener('click', startSession);
 
-      // push-to-talk는 누르는 동안 녹음하고 버튼을 놓으면 STT로 보낸다.
+      // push-to-talk는 서버 capability에 따라 PCM 스트리밍 또는 파일 전사를 쓴다.
       let recorder = null;
+      let pcmCapture = null;
+      let preparedPcmContext = null;
+      let preparedPcmReady = null;
       let activeStream = null;
       let recordingRequest = 0;
       let pressHeld = false;
+      const MIN_STREAM_STT_SAMPLES = 6000;
+      const MAX_STT_BUFFERED_BYTES = 512 * 1024;
 
       function releaseHold(clientEventId, socket = ws) {
         if (!clientEventId || activeHoldEventId !== clientEventId) return false;
@@ -424,10 +741,340 @@
         return sessionId + '-' + (++clientEventSequence);
       }
 
+      function pcm16Base64(samples) {
+        const bytes = new Uint8Array(samples.length * 2);
+        const view = new DataView(bytes.buffer);
+        for (let index = 0; index < samples.length; index += 1) {
+          const sample = Math.max(-1, Math.min(1, samples[index]));
+          const value = sample < 0 ? sample * 32768 : sample * 32767;
+          view.setInt16(index * 2, Math.round(value), true);
+        }
+        let binary = '';
+        for (let offset = 0; offset < bytes.length; offset += 8192) {
+          binary += String.fromCharCode(...bytes.subarray(offset, offset + 8192));
+        }
+        return btoa(binary);
+      }
+
+      function captureIsCurrent(capture) {
+        return pcmCapture === capture
+          && !capture.ended
+          && capture.request === recordingRequest
+          && capture.epoch === connectionEpoch
+          && capture.socket === ws
+          && sessionState === 'running';
+      }
+
+      function disposePreparedPcmContext() {
+        const context = preparedPcmContext;
+        preparedPcmContext = null;
+        preparedPcmReady = null;
+        if (context) {
+          try { context.close(); } catch (_) {}
+        }
+      }
+
+      function preparePcmContext() {
+        if (preparedPcmReady) return preparedPcmReady;
+        const AudioContextClass = globalThis.AudioContext || globalThis.webkitAudioContext;
+        if (!AudioContextClass || !globalThis.AudioWorkletNode) {
+          return Promise.resolve(null);
+        }
+
+        let context;
+        try {
+          context = new AudioContextClass({ sampleRate: 24000 });
+        } catch (_) {
+          return Promise.resolve(null);
+        }
+        preparedPcmContext = context;
+        preparedPcmReady = Promise.all([
+          context.audioWorklet.addModule('/pcm-capture-worklet.js'),
+          context.resume(),
+        ]).then(() => {
+          if (context.sampleRate !== 24000 || preparedPcmContext !== context) {
+            try { context.close(); } catch (_) {}
+            return null;
+          }
+          return context;
+        }).catch(() => {
+          if (preparedPcmContext === context) {
+            preparedPcmContext = null;
+            preparedPcmReady = null;
+          }
+          try { context.close(); } catch (_) {}
+          return null;
+        });
+        return preparedPcmReady;
+      }
+
+      function teardownPcmCapture(capture, stopTracks = true) {
+        if (!capture || capture.ended) return;
+        capture.ended = true;
+        capture.resolveFlush?.(false);
+        capture.resolveFlush = null;
+        if (capture.isVad) {
+          if (pcmCapture === capture) pcmCapture = null;
+          micBtn.classList.remove('rec');
+          updateMicControl();
+          return;
+        }
+        try { capture.node.port.onmessage = null; } catch (_) {}
+        for (const part of [capture.source, capture.node, capture.gain]) {
+          try { part.disconnect(); } catch (_) {}
+        }
+        if (stopTracks) capture.stream.getTracks().forEach((track) => track.stop());
+        if (activeStream === capture.stream) activeStream = null;
+        if (pcmCapture === capture) pcmCapture = null;
+        micBtn.classList.remove('rec');
+        micBtn.setAttribute('aria-pressed', 'false');
+        syncUi();
+      }
+
+      function abortPcmCapture(capture, message = null) {
+        if (!capture || capture.ended) return;
+        pressHeld = false;
+        const clientEventId = capture.clientEventId;
+        teardownPcmCapture(capture);
+        releaseHold(clientEventId, capture.socket);
+        if (capture.isVad) capture.listener.controller?.reset();
+        if (message) setStatus(message);
+      }
+
+      function sendPcmChunk(capture, samples) {
+        if (!captureIsCurrent(capture) || !samples?.length) return;
+        if (capture.socket.bufferedAmount > MAX_STT_BUFFERED_BYTES) {
+          abortPcmCapture(capture, '네트워크가 느려 음성 입력을 멈췄어요. 다시 시도해 주세요.');
+          return;
+        }
+        const sequenceNumber = capture.sequenceNumber + 1;
+        const sent = safeSend({
+          type: 'voice_stream_chunk',
+          client_event_id: capture.clientEventId,
+          sequence_number: sequenceNumber,
+          audio: pcm16Base64(samples),
+        }, capture.socket);
+        if (!sent) {
+          abortPcmCapture(capture);
+          return;
+        }
+        capture.sequenceNumber = sequenceNumber;
+        capture.totalSamples += samples.length;
+      }
+
+      async function beginPcmCapture(stream, request, epoch, socket, clientEventId) {
+        const context = await preparedPcmReady;
+        if (!context || context !== preparedPcmContext
+          || context.sampleRate !== sttStreamConfig.sample_rate_hz) return false;
+
+        let source = null;
+        let node = null;
+        let gain = null;
+        try {
+          source = context.createMediaStreamSource(stream);
+          node = new AudioWorkletNode(context, 'pcm-capture-processor', {
+            numberOfInputs: 1,
+            numberOfOutputs: 1,
+            outputChannelCount: [1],
+          });
+          gain = context.createGain();
+          gain.gain.value = 0;
+          await context.resume();
+        } catch (_) {
+          for (const part of [source, node, gain]) {
+            try { part?.disconnect(); } catch (_) {}
+          }
+          return false;
+        }
+
+        const stale = request !== recordingRequest || epoch !== connectionEpoch
+          || socket !== ws || sessionState !== 'running' || !pressHeld;
+        if (stale) {
+          for (const part of [source, node, gain]) {
+            try { part.disconnect(); } catch (_) {}
+          }
+          stream.getTracks().forEach((track) => track.stop());
+          return true;
+        }
+
+        const capture = {
+          clientEventId,
+          context,
+          ended: false,
+          epoch,
+          finishing: false,
+          gain,
+          node,
+          request,
+          resolveFlush: null,
+          sequenceNumber: 0,
+          socket,
+          source,
+          stream,
+          totalSamples: 0,
+        };
+        node.port.onmessage = (event) => {
+          if (!captureIsCurrent(capture)) return;
+          if (event.data?.type === 'audio') sendPcmChunk(capture, event.data.samples);
+          if (event.data?.type === 'flushed') {
+            capture.resolveFlush?.(true);
+            capture.resolveFlush = null;
+          }
+        };
+        pcmCapture = capture;
+        activeStream = stream;
+        const started = safeSend({
+          type: 'voice_stream_start',
+          client_event_id: clientEventId,
+          encoding: sttStreamConfig.encoding,
+          sample_rate_hz: sttStreamConfig.sample_rate_hz,
+          channels: sttStreamConfig.channels,
+        }, socket);
+        if (!started) {
+          teardownPcmCapture(capture);
+          return true;
+        }
+        source.connect(node);
+        node.connect(gain);
+        gain.connect(context.destination);
+        micBtn.classList.add('rec');
+        micBtn.setAttribute('aria-pressed', 'true');
+        syncUi();
+        return true;
+      }
+
+      function showPendingTranscript(clientEventId) {
+        pendingStt = add('user', '듣는 중...');
+        voiceRequestClientEventId = clientEventId;
+        setStatus('음성을 확인하고 있어요.');
+        const placed = pendingStt;
+        setTimeout(() => {
+          if (pendingStt !== placed || voiceRequestClientEventId !== clientEventId) return;
+          if (vadMode) cancelVadSpeech(true, { resetIdle: false });
+          else clearVoiceRequest(clientEventId);
+          setStatus('음성 확인이 늦어지고 있어요. 다시 시도해 주세요.');
+        }, 20000);
+      }
+
+      async function finishPcmCapture(capture) {
+        if (!capture || capture.ended || capture.finishing) return;
+        capture.finishing = true;
+        pressHeld = false;
+        micBtn.classList.remove('rec');
+        micBtn.setAttribute('aria-pressed', 'false');
+        syncUi();
+
+        const flushed = new Promise((resolve) => { capture.resolveFlush = resolve; });
+        try { capture.node.port.postMessage({ type: 'flush' }); } catch (_) {
+          capture.resolveFlush?.(false);
+        }
+        const flushSucceeded = await Promise.race([
+          flushed,
+          new Promise((resolve) => setTimeout(() => resolve(false), 500)),
+        ]);
+        if (!captureIsCurrent(capture)) return;
+        if (!flushSucceeded) {
+          abortPcmCapture(capture, '음성 입력을 마무리하지 못했어요. 다시 시도해 주세요.');
+          return;
+        }
+
+        commitPcmCapture(capture);
+      }
+
+      function commitPcmCapture(capture) {
+        if (!captureIsCurrent(capture)) return;
+        const { clientEventId, sequenceNumber, totalSamples, socket } = capture;
+        teardownPcmCapture(capture);
+        if (totalSamples < MIN_STREAM_STT_SAMPLES) {
+          releaseHold(clientEventId, socket);
+          setStatus('조금 더 길게 말해 주세요.');
+          return;
+        }
+        showPendingTranscript(clientEventId);
+        const sent = safeSend({
+          type: 'voice_stream_commit',
+          client_event_id: clientEventId,
+          final_sequence_number: sequenceNumber,
+          total_samples: totalSamples,
+        }, socket);
+        if (sent && activeHoldEventId === clientEventId) {
+          activeHoldEventId = null;
+        } else if (!sent) {
+          clearVoiceRequest(clientEventId);
+        }
+      }
+
+      function beginRecordedCapture(stream, request, epoch, socket, clientEventId) {
+        activeStream = stream;
+        const mediaRecorder = new MediaRecorder(stream, { audioBitsPerSecond: 128000 });
+        const chunks = [];
+        recorder = mediaRecorder;
+        mediaRecorder.ondataavailable = (event) => chunks.push(event.data);
+        mediaRecorder.onstop = async () => {
+          stream.getTracks().forEach((track) => track.stop());
+          if (activeStream === stream) activeStream = null;
+          if (recorder === mediaRecorder) recorder = null;
+          if (request !== recordingRequest || epoch !== connectionEpoch
+            || socket !== ws || sessionState !== 'running') return;
+          pressHeld = false;
+          micBtn.classList.remove('rec');
+          micBtn.setAttribute('aria-pressed', 'false');
+          syncUi();
+
+          const blob = new Blob(chunks, { type: mediaRecorder.mimeType });
+          if (blob.size < 8000) {
+            releaseHold(clientEventId, socket);
+            setStatus('조금 더 길게 말해 주세요.');
+            return;
+          }
+          showPendingTranscript(clientEventId);
+          let b64;
+          try {
+            b64 = await new Promise((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onload = () => resolve(reader.result.split(',')[1]);
+              reader.onerror = () => reject(new Error('audio read failed'));
+              reader.onabort = () => reject(new Error('audio read aborted'));
+              reader.readAsDataURL(blob);
+            });
+          } catch (_) {
+            if (pendingStt) clearVoiceRequest(clientEventId);
+            if (request === recordingRequest && epoch === connectionEpoch
+              && socket === ws && sessionState === 'running') {
+              releaseHold(clientEventId, socket);
+              setStatus('음성을 준비하지 못했어요. 다시 시도해 주세요.');
+            }
+            return;
+          }
+          if (request === recordingRequest && epoch === connectionEpoch
+            && socket === ws && sessionState === 'running') {
+            const sent = safeSend({
+              type: 'voice',
+              client_event_id: clientEventId,
+              audio: b64,
+              mime: mediaRecorder.mimeType,
+            }, socket);
+            if (sent && activeHoldEventId === clientEventId) {
+              activeHoldEventId = null;
+            } else if (!sent) {
+              clearVoiceRequest(clientEventId);
+            }
+          } else if (pendingStt) {
+            clearVoiceRequest(clientEventId);
+          }
+        };
+        mediaRecorder.start();
+        micBtn.classList.add('rec');
+        micBtn.setAttribute('aria-pressed', 'true');
+        syncUi();
+      }
+
       function cleanupRecording() {
+        stopVadListening(false);
         pressHeld = false;
         recordingRequest += 1;
         activeHoldEventId = null;
+        if (pcmCapture) teardownPcmCapture(pcmCapture);
         if (recorder) {
           recorder.ondataavailable = null;
           recorder.onstop = null;
@@ -444,135 +1091,277 @@
       }
 
       async function startRec() {
+        if (vadMode) return;
         if (sessionState !== 'running' || !ws || ws.readyState !== WebSocket.OPEN) return;
         if (voiceRequestClientEventId || pressHeld
-          || (recorder && recorder.state === 'recording')) return;
+          || pcmCapture || (recorder && recorder.state === 'recording')) return;
+        setStatus('듣고 있어요. 말이 끝나면 버튼에서 손을 떼세요.');
         const gestureStartedAt = performance.now();
+        voiceRequestReleasedAt = null;
         pressHeld = true;
+        syncUi();
         const request = ++recordingRequest;
         const epoch = connectionEpoch;
         const socket = ws;
-        const clientEventId = nextClientEventId();
-        activeHoldEventId = clientEventId;
-        suppressAudioUntilNextTurn = true;
-        audioSuppressionClientEventId = clientEventId;
-        const stopped = stopAudio(gestureStartedAt, false);
-        safeSend({
-          type: 'hold',
-          client_event_id: clientEventId,
-          audio_stop: stopped.audioStop,
-        }, socket);
-        if (stopped.maxSeq > 0) ack(stopped.maxSeq);
+        const clientEventId = claimVoiceHold(gestureStartedAt, socket);
         try {
-          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          const stream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              channelCount: 1,
+              sampleRate: 24000,
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true,
+            },
+          });
           const stale = request !== recordingRequest || epoch !== connectionEpoch
             || socket !== ws || sessionState !== 'running' || !pressHeld;
           if (stale) {
             stream.getTracks().forEach((t) => t.stop());
             return;
           }
-
-          activeStream = stream;
-          const mediaRecorder = new MediaRecorder(stream, { audioBitsPerSecond: 128000 });
-          const chunks = [];
-          recorder = mediaRecorder;
-          mediaRecorder.ondataavailable = (event) => chunks.push(event.data);
-          mediaRecorder.onstop = async () => {
-            pressHeld = false;
+          if (sttStreamConfig) {
+            if (await beginPcmCapture(stream, request, epoch, socket, clientEventId)) return;
             stream.getTracks().forEach((track) => track.stop());
-            if (activeStream === stream) activeStream = null;
-            if (recorder === mediaRecorder) recorder = null;
-            micBtn.classList.remove('rec');
-            micBtn.setAttribute('aria-pressed', 'false');
-            if (request !== recordingRequest || epoch !== connectionEpoch
-              || socket !== ws || sessionState !== 'running') return;
-
-            const blob = new Blob(chunks, { type: mediaRecorder.mimeType });
-            if (blob.size < 8000) { // 스치듯 눌린 짧은 녹음 — 발화권 반납
-              releaseHold(clientEventId, socket);
-              return;
-            }
-            // 전사되는 동안의 무반응 공백을 없앤다 — 즉시 자리 표시
-            pendingStt = add('user', '듣는 중...');
-            voiceRequestClientEventId = clientEventId;
-            const placed = pendingStt;
-            setTimeout(() => { if (pendingStt === placed) { placed.wrap.remove(); pendingStt = null; } }, 10000);
-            let b64;
-            try {
-              b64 = await new Promise((resolve, reject) => {
-                const reader = new FileReader();
-                reader.onload = () => resolve(reader.result.split(',')[1]);
-                reader.onerror = () => reject(new Error('audio read failed'));
-                reader.onabort = () => reject(new Error('audio read aborted'));
-                reader.readAsDataURL(blob);
-              });
-            } catch (_) {
-              if (pendingStt === placed) clearVoiceRequest(clientEventId);
-              if (request === recordingRequest && epoch === connectionEpoch
-                && socket === ws && sessionState === 'running') {
-                releaseHold(clientEventId, socket);
-              }
-              return;
-            }
-            if (request === recordingRequest && epoch === connectionEpoch
-              && socket === ws && sessionState === 'running') {
-              const sent = safeSend({
-                type: 'voice',
-                client_event_id: clientEventId,
-                audio: b64,
-                mime: mediaRecorder.mimeType,
-              }, socket);
-              if (sent && activeHoldEventId === clientEventId) {
-                activeHoldEventId = null;
-              } else if (!sent) {
-                clearVoiceRequest(clientEventId);
-              }
-            } else if (pendingStt === placed) {
-              clearVoiceRequest(clientEventId);
-            }
-          };
-          mediaRecorder.start();
-          micBtn.classList.add('rec');
-          micBtn.setAttribute('aria-pressed', 'true');
+            pressHeld = false;
+            releaseHold(clientEventId, socket);
+            setStatus('이 브라우저에서는 스트리밍 마이크를 시작하지 못했어요.');
+            return;
+          }
+          beginRecordedCapture(stream, request, epoch, socket, clientEventId);
         } catch (e) {
           if (request === recordingRequest && socket === ws) {
             releaseHold(clientEventId, socket);
             cleanupRecording();
-            statusEl.textContent = '마이크 권한이 필요해요. 텍스트로도 참여할 수 있어요.';
+            setStatus('마이크 권한이 필요해요. 텍스트로도 참여할 수 있어요.');
           }
         }
       }
       function stopRec() {
-        if (!pressHeld && (!recorder || recorder.state !== 'recording')) return;
+        if (vadMode) return;
+        if (!pressHeld && !pcmCapture
+          && (!recorder || recorder.state !== 'recording')) return;
+        if (pcmCapture?.finishing) return;
+        voiceRequestReleasedAt = performance.now();
         pressHeld = false;
-        if (recorder && recorder.state === 'recording') {
+        if (pcmCapture) {
+          finishPcmCapture(pcmCapture);
+        } else if (recorder && recorder.state === 'recording') {
           recorder.stop();
         } else {
           releaseHold(activeHoldEventId);
+          if (sessionState === 'running') {
+            setStatus('대화 중, 언제든 끼어들 수 있어요.');
+          }
         }
         micBtn.classList.remove('rec');
         micBtn.setAttribute('aria-pressed', 'false');
+        syncUi();
       }
       micBtn.onpointerdown = startRec;
       micBtn.onpointerup = stopRec;
       micBtn.onpointerleave = stopRec;
       micBtn.onpointercancel = stopRec;
+      micBtn.addEventListener('keydown', (event) => {
+        if (vadMode || ![' ', 'Enter'].includes(event.key) || event.altKey || event.ctrlKey || event.metaKey) return;
+        event.preventDefault();
+        if (!event.repeat) return startRec();
+      });
+      micBtn.addEventListener('keyup', (event) => {
+        if (vadMode || ![' ', 'Enter'].includes(event.key)) return;
+        event.preventDefault();
+        stopRec();
+      });
+      micBtn.addEventListener('blur', stopRec);
+      globalThis.addEventListener?.('blur', stopRec);
+
+      function claimVoiceHold(startedAt, socket) {
+        const clientEventId = nextClientEventId();
+        activeHoldEventId = clientEventId;
+        suppressAudioUntilNextTurn = true;
+        audioSuppressionClientEventId = clientEventId;
+        const stopped = stopAudio(startedAt, false);
+        safeSend({
+          type: 'hold',
+          client_event_id: clientEventId,
+          audio_stop: stopped.audioStop,
+        }, socket);
+        if (stopped.maxSeq > 0) ack(stopped.maxSeq);
+        return clientEventId;
+      }
+
+      function vadListenerIsCurrent(listener) {
+        return vadListener === listener && listener.epoch === connectionEpoch
+          && listener.socket === ws && ['starting', 'running'].includes(sessionState);
+      }
+
+      function cancelVadSpeech(notifyServer = true, { resetIdle = true } = {}) {
+        const capture = pcmCapture?.isVad ? pcmCapture : null;
+        const clientEventId = capture?.clientEventId || voiceRequestClientEventId;
+        if (capture) teardownPcmCapture(capture);
+        if (clientEventId && notifyServer) {
+          if (activeHoldEventId === clientEventId) releaseHold(clientEventId);
+          else safeSend({ type: 'hold_off', client_event_id: clientEventId });
+        } else if (activeHoldEventId === clientEventId) {
+          activeHoldEventId = null;
+        }
+        clearVoiceRequest();
+        // An ended utterance has already rearmed VAD; keep the next speech candidate.
+        if (capture || resetIdle) vadListener?.controller?.reset();
+      }
+
+      function stopVadListening(notifyServer = true) {
+        const listener = vadListener;
+        if (!listener) return;
+        vadListener = null;
+        cancelVadSpeech(notifyServer);
+        try { Promise.resolve(listener.controller?.destroy()).catch(() => {}); } catch (_) {}
+        updateMicControl();
+      }
+
+      function beginVadSpeech(listener, { detectedAt }) {
+        if (!vadListenerIsCurrent(listener) || pcmCapture) return;
+        if (sessionState !== 'running') {
+          listener.preSessionSpeech = true;
+          return;
+        }
+        clearVoiceRequest();
+        const clientEventId = claimVoiceHold(detectedAt, listener.socket);
+        const capture = {
+          isVad: true, listener, clientEventId, ended: false,
+          request: ++recordingRequest, epoch: listener.epoch,
+          socket: listener.socket, sequenceNumber: 0, totalSamples: 0,
+        };
+        pcmCapture = capture;
+        safeSend({ type: 'vad_observed', client_event_id: clientEventId, milestone: 'start' });
+        const sent = safeSend({
+          type: 'voice_stream_start', client_event_id: clientEventId,
+          encoding: sttStreamConfig.encoding,
+          sample_rate_hz: sttStreamConfig.sample_rate_hz,
+          channels: sttStreamConfig.channels,
+        });
+        if (!sent) {
+          abortPcmCapture(capture);
+          return;
+        }
+        micBtn.classList.add('rec');
+        setStatus('듣고 있어요. 말이 끝나면 자동으로 전송해요.');
+      }
+
+      function endVadSpeech(listener, { detectedAt, reason }) {
+        if (vadListenerIsCurrent(listener) && sessionState === 'starting') {
+          listener.preSessionSpeech = reason !== 'silence';
+          return;
+        }
+        const capture = pcmCapture;
+        if (!vadListenerIsCurrent(listener) || !capture?.isVad
+          || capture.listener !== listener) return;
+        if (reason === 'max_duration') {
+          cancelVadSpeech();
+          setStatus('음성 입력이 길어 중단했어요. 잠시 쉰 뒤 나누어 말해 주세요.');
+          return;
+        }
+        voiceRequestReleasedAt = detectedAt;
+        safeSend({
+          type: 'vad_observed', client_event_id: capture.clientEventId, milestone: 'end',
+        });
+        // VAD 어댑터가 잔여 PCM을 보낸 뒤에만 종료 콜백을 호출한다.
+        commitPcmCapture(capture);
+      }
+
+      async function toggleVadListening() {
+        if (!vadMode || !sttAvailable) return;
+        if (sessionState === 'starting') {
+          failSessionPreparation(ws, '마이크 준비를 취소했어요. 준비되면 다시 시작해 주세요.');
+          return;
+        }
+        if (sessionState !== 'running') return;
+        if (vadListener) {
+          stopVadListening();
+          setStatus('마이크가 꺼져 있어요. 텍스트로도 참여할 수 있어요.');
+          return;
+        }
+        await startVadListening();
+      }
+
+      async function startVadListening() {
+        if (vadListener) return vadListener.ready;
+        const listener = { epoch: connectionEpoch, socket: ws, controller: null, ready: false };
+        vadListener = listener;
+        updateMicControl();
+        setStatus('마이크와 음성 감지를 준비하고 있어요.');
+        try {
+          const context = await preparePcmContext();
+          if (!vadListenerIsCurrent(listener)) return;
+          if (!context || !globalThis.BanterVadCapture) throw new Error('vad_unavailable');
+          await context.resume();
+          if (!vadListenerIsCurrent(listener)) return;
+          const controller = await globalThis.BanterVadCapture.create({
+            audioContext: context,
+            isCurrent: () => vadListenerIsCurrent(listener),
+            onStart: (event) => beginVadSpeech(listener, event),
+            onChunk: (samples) => {
+              if (vadListenerIsCurrent(listener) && pcmCapture?.listener === listener) {
+                sendPcmChunk(pcmCapture, samples);
+              }
+            },
+            onEnd: (event) => endVadSpeech(listener, event),
+            onError: () => {
+              if (!vadListenerIsCurrent(listener)) return;
+              if (sessionState === 'starting') {
+                failSessionPreparation(listener.socket, '마이크를 준비하지 못했어요. 권한과 연결을 확인하고 다시 시작해 주세요.');
+              } else {
+                stopVadListening();
+                setStatus('음성 감지가 중단됐어요. 마이크를 다시 켜 주세요.');
+              }
+            },
+          });
+          if (!vadListenerIsCurrent(listener)) {
+            await controller.destroy();
+            return;
+          }
+          listener.controller = controller;
+          await controller.start();
+          if (!vadListenerIsCurrent(listener)) return;
+          listener.ready = true;
+          updateMicControl();
+          setStatus(sessionState === 'starting' ? '마이크가 준비됐어요. 대화를 시작하고 있어요.'
+            : '마이크가 켜져 있어요. 말하면 대화에 참여해요.');
+          return true;
+        } catch (_) {
+          if (!vadListenerIsCurrent(listener)) return;
+          if (sessionState === 'starting') {
+            failSessionPreparation(listener.socket, '마이크를 준비하지 못했어요. 권한과 연결을 확인하고 다시 시작해 주세요.');
+          } else {
+            stopVadListening();
+            setStatus('마이크 또는 음성 감지를 시작하지 못했어요. 다시 켜거나 텍스트로 참여해 주세요.');
+          }
+          return false;
+        }
+      }
+
+      micBtn.addEventListener('click', toggleVadListening);
 
       form.onsubmit = (e) => {
         e.preventDefault();
         if (sessionState !== 'running' || !ws || ws.readyState !== WebSocket.OPEN) return;
         const v = input.value.trim();
         if (!v) return;
+        if (vadMode) cancelVadSpeech();
         if (activeHoldEventId) {
           releaseHold(activeHoldEventId);
           cleanupRecording();
+        }
+        if (voiceRequestClientEventId) {
+          clearVoiceRequest(voiceRequestClientEventId);
         }
         const clientEventId = nextClientEventId();
         suppressAudioUntilNextTurn = true;
         audioSuppressionClientEventId = clientEventId;
         stopAudio(); // 끼어드는 순간 AI 목소리를 즉시 끊는다 (클라이언트 barge)
         add('user', v); // 내 발화는 로컬에서 바로 표시
-        safeSend({ type: 'say', text: v, client_event_id: clientEventId });
+        const sent = safeSend({ type: 'say', text: v, client_event_id: clientEventId });
+        if (sent) setStatus('대화 중, 언제든 끼어들 수 있어요.');
         input.value = '';
       };
 

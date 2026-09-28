@@ -13,7 +13,8 @@
 FE는 {played, seq}로 응답한다. 서버는 acked=max(acked, seq)만 기억하므로
 ack 중복은 무해하고, 유실도 뒤 ack이 덮는다(개수 카운터의 적자 문제 제거).
 
-서버에서 FE: {hello,voice} {session_started,session_id}
+서버에서 FE: {hello,voice,stt,stt_stream?,interaction_mode,vad?} {session_started,session_id}
+        {you,text,client_event_id?} {stt_error,client_event_id,code}
         {start,speaker,after_client_event_id?} {token,text}*
         {end,speaker,text} {audio,seq,speaker,text,audio|null} {interrupted,...}
         {error,...} {done}
@@ -22,11 +23,17 @@ FE에서 서버: {"type":"session_start"}
         | {"type":"hold","client_event_id":...,"audio_stop":...}
         | {"type":"hold_off","client_event_id":...}
         | {"type":"voice","client_event_id":...,"audio":...,"mime":...}
+        | {"type":"voice_stream_start","client_event_id":...,...}
+        | {"type":"voice_stream_chunk","client_event_id":...,...}
+        | {"type":"voice_stream_commit","client_event_id":...,...}
+        | {"type":"stt_observed","client_event_id":...,...}
+        | {"type":"vad_observed","client_event_id":...,"milestone":"start"|"end"}
         | {"type":"played","seq":N} (일반 텍스트는 say로 폴백)
 """
 
 import asyncio
 import base64
+import binascii
 import json
 import re
 from math import isfinite
@@ -35,8 +42,11 @@ from uuid import uuid4
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from api.event_log import EventName
+from api.stt_stream import StreamingSTTRequest
+from engine.eval.providers import realtime_stt_diagnostics
 from engine.graph.graph import (
     MAX_SENTENCES,
     _strip_speaker_prefix,
@@ -60,7 +70,27 @@ RADIO_SEC = 5.0  # 유저 침묵이 이 시간을 넘으면 AI 턴을 자동 진
 MAX_TURNS = 12  # AI 발화가 이 수에 도달하면 마무리 후 종료(세션 캡)
 ACK_SEC = 30.0  # played ack 최대 대기 — 초과 시 장부를 리셋해 세션이 영구 지연되지 않게
 HOLD_SEC = 15.0  # hold 최대 유지 시간. 전사가 안 오면 라디오로 복귀한다.
+HOLD_POLL_SEC = 1.0  # hold 중 새 입력과 전사 완료를 다시 확인하는 간격
 MIN_VOICE_BYTES = 6000  # 이보다 짧은 녹음은 무시 (무음·스침 — 환각 전사 방지)
+FILE_STT_TIMEOUT_SEC = 15.0
+STREAM_STT_SAMPLE_RATE = 24_000
+STREAM_STT_CHANNELS = 1
+STREAM_STT_ENCODING = 'pcm_s16le'
+STREAM_STT_CHUNK_SAMPLES = 2_400
+MIN_STREAM_STT_SAMPLES = 6_000
+MAX_STREAM_STT_CHUNK_BYTES = STREAM_STT_CHUNK_SAMPLES * 2
+MAX_STREAM_STT_CHUNK_BASE64_CHARS = 4 * ((MAX_STREAM_STT_CHUNK_BYTES + 2) // 3)
+MAX_STREAM_STT_BYTES = STREAM_STT_SAMPLE_RATE * 2 * 15
+STREAM_STT_APPEND_SEC = 2.0
+STREAM_STT_CLEANUP_SEC = 2.0
+MAX_STREAM_STT_PENDING_CHUNKS = MAX_STREAM_STT_BYTES // MAX_STREAM_STT_CHUNK_BYTES
+VAD_CONFIG = {
+    'engine': 'silero_v5',
+    'start_ms': 160,
+    'end_silence_ms': 600,
+    'pre_roll_ms': 256,
+    'max_utterance_ms': 12_000,
+}
 DRAIN_SEC = 15.0  # 종료 전 남은 TTS 전송을 기다리는 상한 (마무리 멘트 유실 방지)
 FINISH_INTENT = '이제 대화를 자연스럽게 마무리하는 인사를 건네라'
 CLIENT_AUDIO_STOP_MAX_MS = 60_000.0
@@ -149,6 +179,37 @@ def _parse_incoming(raw: str) -> tuple[str, object]:
         if data.get('type') == 'played':
             seq = data.get('seq')
             return 'played', seq if isinstance(seq, int) else None
+        if data.get('type') == 'vad_observed':
+            client_event_id, valid_id = _safe_client_event_id(data)
+            milestone = data.get('milestone')
+            if (
+                not valid_id
+                or client_event_id is None
+                or not isinstance(milestone, str)
+                or milestone not in {'start', 'end'}
+            ):
+                return 'noop', None
+            return 'vad_observed', {
+                'client_event_id': client_event_id,
+                'milestone': milestone,
+            }
+        if data.get('type') == 'stt_observed':
+            client_event_id, valid_id = _safe_client_event_id(data)
+            elapsed = data.get('elapsed_ms')
+            if (
+                not valid_id
+                or client_event_id is None
+                or data.get('milestone') != 'final'
+                or isinstance(elapsed, bool)
+                or not isinstance(elapsed, (int, float))
+                or not isfinite(elapsed)
+                or not 0 <= elapsed <= CLIENT_AUDIO_STOP_MAX_MS
+            ):
+                return 'noop', None
+            return 'stt_observed', {
+                'client_event_id': client_event_id,
+                'elapsed_ms': round(float(elapsed), 3),
+            }
         if data.get('type') == 'say':
             client_event_id, valid_id = _safe_client_event_id(data)
             if not valid_id:
@@ -159,7 +220,14 @@ def _parse_incoming(raw: str) -> tuple[str, object]:
                 if text
                 else ('noop', None)
             )
-        if data.get('type') in {'voice', 'hold', 'hold_off'}:
+        if data.get('type') in {
+            'voice',
+            'hold',
+            'hold_off',
+            'voice_stream_start',
+            'voice_stream_chunk',
+            'voice_stream_commit',
+        }:
             client_event_id, valid_id = _safe_client_event_id(data)
             if not valid_id:
                 return 'noop', None
@@ -176,6 +244,48 @@ def _parse_incoming(raw: str) -> tuple[str, object]:
                 }
             if data.get('type') == 'hold_off':
                 return 'hold_off', {'client_event_id': client_event_id}
+            if data.get('type') == 'voice_stream_start':
+                return 'voice_stream_start', {
+                    'client_event_id': client_event_id,
+                    'encoding': data.get('encoding'),
+                    'sample_rate_hz': data.get('sample_rate_hz'),
+                    'channels': data.get('channels'),
+                }
+            if data.get('type') == 'voice_stream_chunk':
+                sequence_number = data.get('sequence_number')
+                if (
+                    not data.get('audio')
+                    or isinstance(sequence_number, bool)
+                    or not isinstance(sequence_number, int)
+                    or sequence_number < 1
+                ):
+                    return 'voice_stream_invalid', {
+                        'client_event_id': client_event_id,
+                    }
+                return 'voice_stream_chunk', {
+                    'client_event_id': client_event_id,
+                    'sequence_number': sequence_number,
+                    'audio': data['audio'],
+                }
+            if data.get('type') == 'voice_stream_commit':
+                final_sequence_number = data.get('final_sequence_number')
+                total_samples = data.get('total_samples')
+                if (
+                    isinstance(final_sequence_number, bool)
+                    or not isinstance(final_sequence_number, int)
+                    or final_sequence_number < 0
+                    or isinstance(total_samples, bool)
+                    or not isinstance(total_samples, int)
+                    or total_samples < 0
+                ):
+                    return 'voice_stream_invalid', {
+                        'client_event_id': client_event_id,
+                    }
+                return 'voice_stream_commit', {
+                    'client_event_id': client_event_id,
+                    'final_sequence_number': final_sequence_number,
+                    'total_samples': total_samples,
+                }
     return 'noop', None
 
 
@@ -205,21 +315,32 @@ def create_app(
     supervisor_client=None,
     tts_client=None,
     stt_client=None,
+    streaming_stt_client=None,
     max_turns: int = MAX_TURNS,
     radio_sec: float = RADIO_SEC,
     ack_sec: float = ACK_SEC,
     unified: bool = False,  # v2 통합 생성(D-003) — 화자 선정+발화를 한 호출로
     *,
+    interaction_mode: str = 'push_to_talk',
     event_recorder=None,
     run_id: str | None = None,
     run_metadata: dict | None = None,
 ) -> FastAPI:
     """WS 채팅 앱을 만든다. LLM/TTS/STT client를 주입받아(테스트는 fake) 엔진을 구동한다."""
+    if interaction_mode not in {'push_to_talk', 'vad'}:
+        raise ValueError('interaction_mode은 push_to_talk 또는 vad여야 합니다')
+    if interaction_mode == 'vad' and streaming_stt_client is None:
+        raise ValueError('VAD에는 streaming_stt_client가 필요합니다')
     app = FastAPI()
+    # 선택 기능의 모델 파일이 없어도 기본 push-to-talk 서버는 시작할 수 있다.
+    vad_assets = WEB_DIR / 'vendor' / 'vad'
+    if vad_assets.is_dir():
+        app.mount('/vad-assets', StaticFiles(directory=vad_assets), name='vad-assets')
     voice_mode = tts_client is not None
     runtime_run_id = run_id or uuid4().hex
     runtime_metadata = {
         **dict(run_metadata or {}),
+        'interaction_mode': interaction_mode,
         'max_turns': max_turns,
         'radio_sec': radio_sec,
         'ack_sec': ack_sec,
@@ -227,6 +348,18 @@ def create_app(
         'protocol_version': 1,
         'voice_mode': voice_mode,
     }
+    if interaction_mode == 'vad':
+        runtime_metadata.update({f'vad_{key}': value for key, value in VAD_CONFIG.items()})
+    stream_stt_config = (
+        {
+            'encoding': STREAM_STT_ENCODING,
+            'sample_rate_hz': STREAM_STT_SAMPLE_RATE,
+            'channels': STREAM_STT_CHANNELS,
+            'chunk_samples': STREAM_STT_CHUNK_SAMPLES,
+        }
+        if streaming_stt_client is not None
+        else None
+    )
 
     def _record(
         ctx: dict,
@@ -266,6 +399,325 @@ def create_app(
             flush()
         except Exception as exc:
             print(f'[events] 저장 실패({type(exc).__name__}), 대화 종료는 유지')
+
+    def _stream_matches_hold(ctx: dict, client_event_id: str | None) -> bool:
+        return bool(
+            client_event_id
+            and ctx.get('next_turn_after_hold_pending')
+            and ctx.get('active_hold_client_event_id') == client_event_id
+        )
+
+    def _clear_streaming_stt_state(ctx: dict) -> None:
+        ctx['streaming_stt_request'] = None
+        ctx['streaming_stt_client_event_id'] = None
+        ctx['streaming_stt_sequence'] = 0
+        ctx['streaming_stt_samples'] = 0
+        ctx['streaming_stt_first_delta'] = False
+
+    def _track_stt_task(ctx: dict, task: asyncio.Task) -> None:
+        tasks = ctx['streaming_stt_tasks']
+        tasks.add(task)
+
+        def finished(task):
+            tasks.discard(task)
+            _drain_task_result(task)
+
+        task.add_done_callback(finished)
+
+    async def _close_streaming_stt(ctx: dict, outcome: str | None = None) -> None:
+        request = ctx.get('streaming_stt_request')
+        client_event_id = ctx.get('streaming_stt_client_event_id')
+        _clear_streaming_stt_state(ctx)
+        if request is not None:
+            request.cancel()
+        if outcome is not None and client_event_id is not None:
+            _record(
+                ctx,
+                EventName.STT_COMPLETED,
+                client_event_id=client_event_id,
+                outcome=outcome,
+            )
+
+    def _drain_task_result(task: asyncio.Task) -> None:
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+
+    async def _drain_stt_cleanup(ctx: dict) -> None:
+        deadline = asyncio.get_running_loop().time() + STREAM_STT_CLEANUP_SEC
+        tasks = ctx['streaming_stt_tasks']
+        while tasks:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                for task in tuple(tasks):
+                    task.cancel()
+                print('[stt] 세션 종료 중 정리 시간이 초과됐습니다')
+                break
+            await asyncio.wait(tuple(tasks), timeout=remaining)
+            # Completed request tasks may have scheduled their resource cleanup.
+            await asyncio.sleep(0)
+
+    async def _send_stt_error(
+        ws: WebSocket,
+        ctx: dict,
+        client_event_id: str | None,
+        code: str,
+        *,
+        record_completion: bool = True,
+    ) -> None:
+        await _close_streaming_stt(
+            ctx,
+            outcome='error' if record_completion else None,
+        )
+        _cancel_pending_hold(ctx, client_event_id)
+        await ws.send_json(
+            {
+                'type': 'stt_error',
+                'client_event_id': client_event_id,
+                'code': code,
+            }
+        )
+
+    async def _send_recorded_stt_error(
+        ws: WebSocket,
+        ctx: dict,
+        client_event_id: str | None,
+        event_client_event_id: str,
+        code: str,
+        outcome: str,
+    ) -> None:
+        _record(
+            ctx,
+            EventName.STT_COMPLETED,
+            client_event_id=event_client_event_id,
+            outcome=outcome,
+        )
+        _cancel_pending_hold(ctx, client_event_id)
+        await ws.send_json(
+            {
+                'type': 'stt_error',
+                'client_event_id': client_event_id,
+                'code': code,
+            }
+        )
+
+    async def _start_streaming_stt(
+        ws: WebSocket,
+        ctx: dict,
+        payload: dict,
+    ) -> None:
+        client_event_id = payload.get('client_event_id')
+        if not _stream_matches_hold(ctx, client_event_id):
+            return
+        valid_config = (
+            payload.get('encoding') == STREAM_STT_ENCODING
+            and payload.get('sample_rate_hz') == STREAM_STT_SAMPLE_RATE
+            and payload.get('channels') == STREAM_STT_CHANNELS
+        )
+        if streaming_stt_client is None or not valid_config:
+            await _send_stt_error(ws, ctx, client_event_id, 'unsupported_format')
+            return
+        if ctx.get('streaming_stt_request') is not None:
+            if ctx.get('streaming_stt_client_event_id') == client_event_id:
+                return
+            await _close_streaming_stt(ctx, outcome='cancelled')
+
+        ctx['streaming_stt_client_event_id'] = client_event_id
+
+        def on_delta(_text: str) -> None:
+            if (
+                ctx.get('streaming_stt_client_event_id') != client_event_id
+                or ctx.get('streaming_stt_first_delta')
+            ):
+                return
+            ctx['streaming_stt_first_delta'] = True
+            _record(
+                ctx,
+                EventName.STT_FIRST_DELTA,
+                client_event_id=client_event_id,
+            )
+
+        def on_ready():
+            if ctx.get('streaming_stt_client_event_id') == client_event_id:
+                _record(
+                    ctx,
+                    EventName.STT_PROVIDER_READY,
+                    client_event_id=client_event_id,
+                )
+
+        ctx['streaming_stt_request'] = StreamingSTTRequest(
+            streaming_stt_client,
+            on_delta=on_delta,
+            on_ready=on_ready,
+            track_task=lambda task: _track_stt_task(ctx, task),
+            max_pending_chunks=MAX_STREAM_STT_PENDING_CHUNKS,
+            append_timeout=STREAM_STT_APPEND_SEC,
+            queue_timeout=HOLD_SEC,
+        )
+        ctx['hold_until'] = asyncio.get_running_loop().time() + HOLD_SEC
+        _record(
+            ctx,
+            EventName.STT_STREAM_STARTED,
+            client_event_id=client_event_id,
+        )
+
+    async def _append_streaming_stt(
+        ws: WebSocket,
+        ctx: dict,
+        payload: dict,
+    ) -> None:
+        client_event_id = payload.get('client_event_id')
+        request = ctx.get('streaming_stt_request')
+        if (
+            not _stream_matches_hold(ctx, client_event_id)
+            or ctx.get('streaming_stt_client_event_id') != client_event_id
+            or request is None
+            or request.committed
+        ):
+            return
+
+        sequence_number = payload['sequence_number']
+        current_sequence = ctx['streaming_stt_sequence']
+        if sequence_number <= current_sequence:
+            return
+        if sequence_number != current_sequence + 1:
+            await _send_stt_error(ws, ctx, client_event_id, 'chunk_sequence')
+            return
+        encoded_audio = payload['audio']
+        if (
+            not isinstance(encoded_audio, str)
+            or len(encoded_audio) > MAX_STREAM_STT_CHUNK_BASE64_CHARS
+        ):
+            await _send_stt_error(ws, ctx, client_event_id, 'invalid_audio')
+            return
+        try:
+            audio = base64.b64decode(encoded_audio, validate=True)
+        except (binascii.Error, ValueError, TypeError):
+            await _send_stt_error(ws, ctx, client_event_id, 'invalid_audio')
+            return
+        if (
+            not audio
+            or len(audio) % 2
+            or len(audio) > MAX_STREAM_STT_CHUNK_BYTES
+            or ctx['streaming_stt_samples'] * 2 + len(audio)
+            > MAX_STREAM_STT_BYTES
+        ):
+            await _send_stt_error(ws, ctx, client_event_id, 'invalid_audio')
+            return
+        try:
+            request.append(audio)
+        except Exception as exc:
+            print('[stt] 스트림 전송 실패 ' + json.dumps(realtime_stt_diagnostics(exc)))
+            await _send_stt_error(ws, ctx, client_event_id, 'provider_unavailable')
+            return
+        ctx['streaming_stt_sequence'] = sequence_number
+        ctx['streaming_stt_samples'] += len(audio) // 2
+        ctx['hold_until'] = asyncio.get_running_loop().time() + HOLD_SEC
+
+    async def _commit_streaming_stt(
+        ws: WebSocket,
+        ctx: dict,
+        payload: dict,
+    ) -> tuple[str, object]:
+        client_event_id = payload.get('client_event_id')
+        request = ctx.get('streaming_stt_request')
+        if (
+            not _stream_matches_hold(ctx, client_event_id)
+            or ctx.get('streaming_stt_client_event_id') != client_event_id
+            or request is None
+        ):
+            return 'noop', None
+        if request.committed:
+            return 'noop', None
+        sequence = ctx['streaming_stt_sequence']
+        samples = ctx['streaming_stt_samples']
+        if (
+            payload['final_sequence_number'] != sequence
+            or payload['total_samples'] != samples
+        ):
+            await _send_stt_error(ws, ctx, client_event_id, 'chunk_sequence')
+            return 'noop', None
+        if samples < MIN_STREAM_STT_SAMPLES:
+            await _close_streaming_stt(ctx, outcome='too_short')
+            _cancel_pending_hold(ctx, client_event_id)
+            await ws.send_json(
+                {
+                    'type': 'stt_error',
+                    'client_event_id': client_event_id,
+                    'code': 'too_short',
+                }
+            )
+            return 'noop', None
+
+        _record(
+            ctx,
+            EventName.STT_INPUT_COMMITTED,
+            client_event_id=client_event_id,
+            metadata={
+                'stt_chunk_count': sequence,
+                'stt_audio_samples': samples,
+                'stt_audio_duration_ms': round(
+                    samples / STREAM_STT_SAMPLE_RATE * 1000,
+                    3,
+                ),
+            },
+        )
+        request.commit()
+        return 'noop', None
+
+    async def _resolve_streaming_stt_finish(
+        ws: WebSocket,
+        ctx: dict,
+        finish_task: asyncio.Task,
+    ) -> tuple[str, object]:
+        request = ctx.get('streaming_stt_request')
+        if request is None or request.task is not finish_task:
+            _drain_task_result(finish_task)
+            return 'noop', None
+
+        client_event_id = ctx.get('streaming_stt_client_event_id')
+        try:
+            text = await finish_task
+        except asyncio.CancelledError:
+            return 'noop', None
+        except Exception as exc:
+            print('[stt] 스트림 처리 실패 ' + json.dumps(realtime_stt_diagnostics(exc)))
+            await _send_stt_error(ws, ctx, client_event_id, 'provider_unavailable')
+            return 'noop', None
+
+        if not _stream_matches_hold(ctx, client_event_id):
+            await _close_streaming_stt(ctx, outcome='cancelled')
+            return 'noop', None
+        _record(
+            ctx,
+            EventName.STT_COMPLETED,
+            client_event_id=client_event_id,
+            outcome='success' if text else 'empty',
+        )
+        _clear_streaming_stt_state(ctx)
+        if not text:
+            _cancel_pending_hold(ctx, client_event_id)
+            await ws.send_json(
+                {
+                    'type': 'stt_error',
+                    'client_event_id': client_event_id,
+                    'code': 'empty_transcript',
+                }
+            )
+            return 'noop', None
+
+        _arm_presentation_release(ctx, client_event_id)
+        await ws.send_json(
+            {
+                'type': 'you',
+                'client_event_id': client_event_id,
+                'text': text,
+            }
+        )
+        return 'say', text
 
     def _record_pending_hold(
         ctx: dict,
@@ -389,6 +841,23 @@ def create_app(
         """
         return FileResponse(WEB_DIR / 'index.html', headers={'Cache-Control': 'no-store'})
 
+    @app.get('/pcm-capture-worklet.js')
+    def pcm_capture_worklet():
+        """24 kHz PCM 캡처용 AudioWorklet을 캐시 없이 제공한다."""
+        return FileResponse(
+            WEB_DIR / 'pcm-capture-worklet.js',
+            media_type='text/javascript',
+            headers={'Cache-Control': 'no-store'},
+        )
+
+    @app.get('/vad-capture.js')
+    def vad_capture():
+        return FileResponse(
+            WEB_DIR / 'vad-capture.js',
+            media_type='text/javascript',
+            headers={'Cache-Control': 'no-store'},
+        )
+
     async def _synthesize(speaker: str, tagged_text: str):
         """화자 voice(+speed)로 태그 포함 발화를 합성해 base64 mp3를 반환한다.
 
@@ -459,11 +928,52 @@ def create_app(
 
         hold와 hold_off는 발화권 신호이며 ctx['hold_until']을 갱신한다.
         voice가 해소되면(성공이든 무효든) hold도 함께 푼다.
-        전사 결과는 {'you', text}로 echo. STT 미설정·실패·빈·초단 녹음은 noop.
+        성공한 전사는 you로 echo하고 실패, 빈 전사, 초단 녹음은 stt_error로 알린다.
+        STT가 설정되지 않은 voice 입력은 noop으로 처리한다.
         """
         loop = asyncio.get_event_loop()
         kind, value = _parse_incoming(raw)
+        if kind == 'vad_observed':
+            client_event_id = value['client_event_id']
+            milestone = value['milestone']
+            observed = ctx['vad_observations']
+            key = (client_event_id, milestone)
+            if (
+                interaction_mode == 'vad'
+                and _stream_matches_hold(ctx, client_event_id)
+                and key not in observed
+                and (milestone == 'start' or (client_event_id, 'start') in observed)
+                and not (ctx.get('streaming_stt_request')
+                         and ctx['streaming_stt_request'].committed)
+            ):
+                observed.add(key)
+                _record(
+                    ctx,
+                    EventName.VAD_SPEECH_STARTED
+                    if milestone == 'start'
+                    else EventName.VAD_SPEECH_ENDED,
+                    client_event_id=client_event_id,
+                )
+            return 'noop', None
+        if kind == 'stt_observed':
+            if value['client_event_id'] in ctx['seen_client_event_ids']:
+                _record(
+                    ctx,
+                    EventName.STT_CLIENT_OBSERVED,
+                    client_event_id=value['client_event_id'],
+                    client_elapsed_ms=value['elapsed_ms'],
+                    outcome='final',
+                )
+            return 'noop', None
         if kind == 'hold':
+            client_event_id = value.get('client_event_id')
+            if (
+                client_event_id is not None
+                and client_event_id in ctx['seen_client_event_ids']
+            ):
+                return 'hold_duplicate', value
+            if ctx.get('streaming_stt_client_event_id') is not None:
+                await _close_streaming_stt(ctx, outcome='cancelled')
             accepted = _record_pending_hold(
                 ctx,
                 ctx.get('active_generation_id'),
@@ -474,10 +984,18 @@ def create_app(
             ctx['hold_until'] = loop.time() + HOLD_SEC
             return 'hold', value
         if kind == 'hold_off':
+            stream_id = ctx.get('streaming_stt_client_event_id')
+            if stream_id is not None and (
+                value.get('client_event_id') is None
+                or value.get('client_event_id') == stream_id
+            ):
+                await _close_streaming_stt(ctx, outcome='cancelled')
             if _cancel_pending_hold(ctx, value.get('client_event_id')):
                 ctx['hold_until'] = 0.0
             return 'noop', None
         if kind == 'say':
+            if ctx.get('streaming_stt_client_event_id') is not None:
+                await _close_streaming_stt(ctx, outcome='cancelled')
             if isinstance(value, dict):
                 text = value['text']
                 client_event_id = value.get('client_event_id')
@@ -496,8 +1014,31 @@ def create_app(
                     ctx.get('active_hold_client_event_id'),
                 )
             return kind, text
+        if kind == 'voice_stream_start':
+            await _start_streaming_stt(ws, ctx, value)
+            return 'noop', None
+        if kind == 'voice_stream_invalid':
+            client_event_id = value.get('client_event_id')
+            if _stream_matches_hold(ctx, client_event_id):
+                await _send_stt_error(
+                    ws,
+                    ctx,
+                    client_event_id,
+                    'invalid_stream',
+                    record_completion=(
+                        ctx.get('streaming_stt_client_event_id') == client_event_id
+                    ),
+                )
+            return 'noop', None
+        if kind == 'voice_stream_chunk':
+            await _append_streaming_stt(ws, ctx, value)
+            return 'noop', None
+        if kind == 'voice_stream_commit':
+            return await _commit_streaming_stt(ws, ctx, value)
         if kind != 'voice':
             return kind, value
+        if ctx.get('streaming_stt_client_event_id') is not None:
+            await _close_streaming_stt(ctx, outcome='cancelled')
         client_event_id = value.get('client_event_id')
         active_id = ctx.get('active_hold_client_event_id')
         pending_hold = ctx.get('next_turn_after_hold_pending')
@@ -512,26 +1053,119 @@ def create_app(
         if stt_client is None:
             _cancel_pending_hold(ctx, client_event_id)
             return 'noop', None
+        ctx['stt_event_sequence'] += 1
+        event_client_event_id = client_event_id or (
+            f'legacy-stt-{ctx["stt_event_sequence"]}'
+        )
         try:
             audio = base64.b64decode(value['audio'])
-            if len(audio) < MIN_VOICE_BYTES:  # 무음·스침 — 환각 전사 방지
-                print(f'[stt] 녹음 너무 짧음({len(audio)}B) — 무시')
-                _cancel_pending_hold(ctx, client_event_id)
-                return 'noop', None
-            text = await stt_client.transcribe(audio, value['mime'])
+        except Exception as exc:
+            print(f'[stt] 음성 디코딩 실패({type(exc).__name__})')
+            await _send_recorded_stt_error(
+                ws,
+                ctx,
+                client_event_id,
+                event_client_event_id,
+                'invalid_audio',
+                'error',
+            )
+            return 'noop', None
+        if len(audio) < MIN_VOICE_BYTES:  # 무음이나 스침 입력의 환각 전사 방지
+            print(f'[stt] 녹음 너무 짧음({len(audio)}B), 무시')
+            await _send_recorded_stt_error(
+                ws,
+                ctx,
+                client_event_id,
+                event_client_event_id,
+                'too_short',
+                'too_short',
+            )
+            return 'noop', None
+        _record(
+            ctx,
+            EventName.STT_INPUT_COMMITTED,
+            client_event_id=event_client_event_id,
+            metadata={'stt_audio_bytes': len(audio)},
+        )
+        try:
+            text = await asyncio.wait_for(
+                stt_client.transcribe(audio, value['mime']),
+                timeout=FILE_STT_TIMEOUT_SEC,
+            )
         except Exception as exc:
             print(f'[stt] 전사 실패({type(exc).__name__}) — 무시')
-            _cancel_pending_hold(ctx, client_event_id)
+            await _send_recorded_stt_error(
+                ws,
+                ctx,
+                client_event_id,
+                event_client_event_id,
+                'provider_unavailable',
+                'error',
+            )
             return 'noop', None
         if not text:
             print('[stt] 빈 전사 — 무시')
-            _cancel_pending_hold(ctx, client_event_id)
+            await _send_recorded_stt_error(
+                ws,
+                ctx,
+                client_event_id,
+                event_client_event_id,
+                'empty_transcript',
+                'empty',
+            )
             return 'noop', None
         print('[stt] 전사 완료')
+        _record(
+            ctx,
+            EventName.STT_COMPLETED,
+            client_event_id=event_client_event_id,
+            outcome='success',
+        )
         if pending_hold:
             _arm_presentation_release(ctx, active_id)
-        await ws.send_json({'type': 'you', 'text': text})
+        response = {'type': 'you', 'text': text}
+        if client_event_id is not None:
+            response['client_event_id'] = client_event_id
+        await ws.send_json(response)
         return 'say', text
+
+    async def _receive_ready(ws: WebSocket, ctx: dict) -> tuple[str, object]:
+        """WebSocket 원문과 백그라운드 전사 완료 중 먼저 온 것을 고른다."""
+        request = ctx.get('streaming_stt_request')
+        finish_task = request.task if request is not None else None
+        receive_task = asyncio.create_task(ws.receive_text())
+        try:
+            if finish_task is None:
+                return 'raw', await receive_task
+            if finish_task.done():
+                await asyncio.sleep(0)
+            done, _ = await asyncio.wait(
+                {receive_task, finish_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if receive_task in done:
+                return 'raw', receive_task.result()
+            return 'stt_finish', finish_task
+        finally:
+            if not receive_task.done():
+                receive_task.cancel()
+                try:
+                    await receive_task
+                except asyncio.CancelledError:
+                    pass
+
+    async def _handle_ready(
+        ws: WebSocket,
+        ctx: dict,
+        ready: tuple[str, object],
+    ) -> tuple[str, object]:
+        ready_kind, value = ready
+        if ready_kind == 'raw':
+            return await _incoming(ws, ctx, value)
+        return await _resolve_streaming_stt_finish(ws, ctx, value)
+
+    async def _receive_incoming(ws: WebSocket, ctx: dict) -> tuple[str, object]:
+        return await _handle_ready(ws, ctx, await _receive_ready(ws, ctx))
 
     async def _flush_stale(ws: WebSocket, ctx: dict) -> None:
         """유저 발화 반영 시점 이전의 오디오를 FE가 버리게 한다.
@@ -762,7 +1396,7 @@ def create_app(
         grabbed = False  # hold는 내용 없이 발화권만 먼저 잡고 전사는 뒤따라온다.
         try:
             while True:
-                recv_task = asyncio.create_task(ws.receive_text())
+                recv_task = asyncio.create_task(_receive_ready(ws, ctx))
                 done, _ = await asyncio.wait(
                     {stream_task, recv_task}, return_when=asyncio.FIRST_COMPLETED
                 )
@@ -771,7 +1405,7 @@ def create_app(
                 if stream_task.done():
                     _finish_generation(ctx, generation_id)
                 if recv_task in done:
-                    kind, value = await _incoming(ws, ctx, recv_task.result())
+                    kind, value = await _handle_ready(ws, ctx, recv_task.result())
                     if kind == 'say':
                         barge = value
                         break
@@ -858,10 +1492,13 @@ def create_app(
                     ctx['acked_seq'] = ctx['sent_seq']
                 return None
             try:
-                raw = await asyncio.wait_for(ws.receive_text(), timeout=remain)
+                ready = await asyncio.wait_for(
+                    _receive_ready(ws, ctx),
+                    timeout=remain,
+                )
             except asyncio.TimeoutError:
                 continue  # deadline 검사로 되돌아감
-            kind, value = await _incoming(ws, ctx, raw)
+            kind, value = await _handle_ready(ws, ctx, ready)
             if kind == 'say':
                 return value
             if kind == 'played':
@@ -871,9 +1508,17 @@ def create_app(
     async def chat(ws: WebSocket) -> None:
         await ws.accept()
         try:
-            await ws.send_json(
-                {'type': 'hello', 'voice': voice_mode, 'stt': stt_client is not None}
-            )
+            hello = {
+                'type': 'hello',
+                'voice': voice_mode,
+                'stt': stt_client is not None,
+                'interaction_mode': interaction_mode,
+            }
+            if interaction_mode == 'vad':
+                hello['vad'] = dict(VAD_CONFIG)
+            if stream_stt_config is not None:
+                hello['stt_stream'] = stream_stt_config
+            await ws.send_json(hello)
             while True:
                 kind, _ = _parse_incoming(await ws.receive_text())
                 if kind == 'session_start':
@@ -898,6 +1543,14 @@ def create_app(
             'acked_seq': 0,
             'hold_until': 0.0,
             'tts_queue': asyncio.Queue(),
+            'streaming_stt_request': None,
+            'streaming_stt_tasks': set(),
+            'streaming_stt_client_event_id': None,
+            'streaming_stt_sequence': 0,
+            'streaming_stt_samples': 0,
+            'streaming_stt_first_delta': False,
+            'stt_event_sequence': 0,
+            'vad_observations': set(),
         }
         state = initial_state()
         turn = 0
@@ -931,12 +1584,28 @@ def create_app(
                     while said is None:
                         remain = ctx['hold_until'] - loop.time()
                         if remain <= 0:
-                            _cancel_pending_hold(
-                                ctx,
-                                ctx.get('active_hold_client_event_id'),
+                            expired_client_event_id = ctx.get(
+                                'active_hold_client_event_id'
                             )
+                            await _close_streaming_stt(ctx, outcome='cancelled')
+                            cancelled = _cancel_pending_hold(
+                                ctx,
+                                expired_client_event_id,
+                            )
+                            if cancelled and expired_client_event_id is not None:
+                                await ws.send_json(
+                                    {
+                                        'type': 'stt_error',
+                                        'client_event_id': expired_client_event_id,
+                                        'code': 'hold_expired',
+                                    }
+                                )
                             break
-                        said = await _wait_user(ws, ctx, min(remain, 1.0))
+                        said = await _wait_user(
+                            ws,
+                            ctx,
+                            min(remain, HOLD_POLL_SEC),
+                        )
                     if said is not None:
                         state = _add_user(state, said)
                         user_spoke = True
@@ -982,10 +1651,20 @@ def create_app(
         except WebSocketDisconnect:
             return
         finally:
-            _cancel_pending_hold(ctx)
-            await _discard(worker)
-            await _discard(prefetch)
-            await asyncio.to_thread(_flush_events)
+            async def cleanup_session():
+                await _close_streaming_stt(ctx, outcome='cancelled')
+                _cancel_pending_hold(ctx)
+                await _discard(worker)
+                await _discard(prefetch)
+                await asyncio.to_thread(_flush_events)
+                await _drain_stt_cleanup(ctx)
+
+            cleanup_task = asyncio.create_task(cleanup_session())
+            try:
+                await asyncio.shield(cleanup_task)
+            except asyncio.CancelledError:
+                await asyncio.shield(cleanup_task)
+                raise
 
     return app
 

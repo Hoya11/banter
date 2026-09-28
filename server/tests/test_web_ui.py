@@ -12,7 +12,10 @@ def test_inline_web_state_machine() -> None:
 
     project_root = Path(__file__).resolve().parents[2]
     result = subprocess.run(
-        [node, '--test', 'web/tests/index-state.test.mjs'],
+        [node, '--test', *[
+            str(path.relative_to(project_root))
+            for path in sorted((project_root / 'web/tests').glob('*.test.mjs'))
+        ]],
         cwd=project_root,
         capture_output=True,
         text=True,
