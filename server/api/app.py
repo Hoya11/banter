@@ -19,7 +19,7 @@ ack 중복은 무해하고, 유실도 뒤 ack이 덮는다(개수 카운터의 �
         {end,speaker,text} {audio,seq,speaker,text,audio|null} {interrupted,...}
         {error,...} {done}
 FE에서 서버: {"type":"session_start"}
-        | {"type":"say","text":...,"client_event_id":...}
+        | {"type":"say","text":...,"client_event_id":...,"audio_stop":...}
         | {"type":"hold","client_event_id":...,"audio_stop":...}
         | {"type":"hold_off","client_event_id":...}
         | {"type":"voice","client_event_id":...,"audio":...,"mime":...}
@@ -45,6 +45,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from api.event_log import EventName
+from api.playback_history import PlaybackHistory
 from api.stt_stream import StreamingSTTRequest
 from engine.eval.providers import realtime_stt_diagnostics
 from engine.graph.graph import (
@@ -115,7 +116,7 @@ def _safe_client_event_id(data: dict) -> tuple[str | None, bool]:
 
 
 def _safe_audio_stop(value: object) -> dict | None:
-    """브라우저 재생 중단 결과에서 측정에 필요한 값만 복사한다."""
+    """브라우저 재생 중단 보고에서 허용된 값만 복사한다."""
     if not isinstance(value, dict):
         return None
 
@@ -216,7 +217,11 @@ def _parse_incoming(raw: str) -> tuple[str, object]:
                 return 'noop', None
             text = str(data.get('text') or '').strip()
             return (
-                ('say', {'text': text, 'client_event_id': client_event_id})
+                ('say', {
+                    'text': text,
+                    'client_event_id': client_event_id,
+                    'audio_stop': _safe_audio_stop(data.get('audio_stop')),
+                })
                 if text
                 else ('noop', None)
             )
@@ -301,12 +306,17 @@ def _add_user(state: dict, text: str) -> dict:
     }
 
 
-def _apply_utterance(state: dict, speaker: str, text: str, interrupted: bool = False) -> dict:
+def _apply_utterance(
+    state: dict, speaker: str, text: str, interrupted: bool = False,
+    *, utterance_id: str | None = None,
+) -> dict:
     """발화를 상태에 반영한다 (메시지 추가 + 발화 카운트). interrupted면 끊긴 발화로 기록."""
     personas = {k: dict(v) for k, v in state['personas'].items()}
     if speaker in personas:
         personas[speaker]['speak_count'] += 1
     msg = {'speaker': speaker, 'text': text, 'ts': 0.0, 'interrupted': interrupted}
+    if utterance_id is not None:
+        msg['utterance_id'] = utterance_id
     return {**state, 'messages': state['messages'] + [msg], 'personas': personas}
 
 
@@ -736,6 +746,7 @@ def create_app(
 
         if ctx.get('next_turn_after_hold_pending'):
             _cancel_pending_hold(ctx, release_presentation=False)
+        ctx['playback_history'].interrupt(payload.get('audio_stop'))
         ctx['tts_epoch'] += 1
 
         _record(
@@ -876,13 +887,16 @@ def create_app(
             return None
 
     async def _send_audio(
-        ws: WebSocket, ctx: dict, speaker: str, clean: str, audio, cont: bool = False
+        ws: WebSocket, ctx: dict, speaker: str, clean: str, audio, cont: bool = False,
+        *, utterance_id: str,
     ) -> None:
         """audio 이벤트를 seq를 붙여 보낸다 (합성 실패 시 audio=null — FE는 자막만 표시).
 
         cont=True는 같은 발화의 이어지는 문장 — FE가 새 말풍선 대신 이어붙인다.
         """
         ctx['sent_seq'] += 1
+        if audio:
+            ctx['playback_history'].sent(ctx['sent_seq'], utterance_id)
         await ws.send_json(
             {
                 'type': 'audio',
@@ -900,7 +914,7 @@ def create_app(
         (턴마다 태스크를 띄우면 합성 완료 순서가 뒤섞여 자막·소리 순서가 깨진다.)
         """
         while True:
-            speaker, clean, tagged, cont, item_epoch, generation_id = await queue.get()
+            speaker, clean, tagged, cont, item_epoch, generation_id, utterance_id = await queue.get()
             try:
                 if item_epoch != ctx['tts_epoch']:
                     _record(
@@ -917,7 +931,9 @@ def create_app(
                         generation_id=generation_id,
                     )
                     continue
-                await _send_audio(ws, ctx, speaker, clean, audio, cont)
+                await _send_audio(
+                    ws, ctx, speaker, clean, audio, cont, utterance_id=utterance_id
+                )
             except Exception:
                 return  # 연결이 닫혔으면 워커 종료
             finally:
@@ -999,6 +1015,7 @@ def create_app(
             if isinstance(value, dict):
                 text = value['text']
                 client_event_id = value.get('client_event_id')
+                ctx['playback_history'].interrupt(value.get('audio_stop'))
             else:
                 text = value
                 client_event_id = None
@@ -1186,8 +1203,11 @@ def create_app(
         """played ack 반영 — seq 장부라 중복·유실에 안전하다."""
         if isinstance(seq, int):
             ctx['acked_seq'] = max(ctx['acked_seq'], seq)
+            if not isinstance(seq, bool) and 0 <= seq <= ctx['sent_seq']:
+                ctx['playback_history'].acknowledge(seq)
         else:  # 구형/비정상 ack — 전량 재생된 것으로 간주
             ctx['acked_seq'] = ctx['sent_seq']
+            ctx['playback_history'].acknowledge(ctx['sent_seq'])
 
     async def _prefetch_turn(state: dict, finish: bool = False) -> dict:
         """다음 AI 턴을 미리 계산하되 이벤트는 전송하지 않는다.
@@ -1230,20 +1250,22 @@ def create_app(
     async def _commit_prefetched(state: dict, ws: WebSocket, ctx: dict, pre: dict) -> dict:
         """미리 만든 턴을 확정 방출한다 — start/end/audio를 한 번에.
 
-        트레이드오프: 이 턴은 스트리밍이 없어 서버측 barge-in이 불가하다.
-        유저 개입은 FE의 재생 중단 + 다음 턴 반영으로 처리되며, 이력에는
-        완주로 남는다. 실시간 경로도 생성된 텍스트 기준이며 실제 청취 위치는 아니다.
+        생성된 전문을 보존하고 브라우저의 재생 중단 보고로 이력에 표시한다.
+        실제로 들은 단어 위치는 추정하지 않는다.
         """
         state = {**state, **pre['sel']}
         speaker, clean = pre['speaker'], pre['clean']
         if not clean:  # 빈 발화는 방출·기록하지 않는다
             await ws.send_json({'type': 'error', 'speaker': speaker})
             return state
+        utterance_id = ctx['playback_history'].begin()
         await _send_start(ws, ctx, speaker)
         await ws.send_json({'type': 'end', 'speaker': speaker, 'text': clean})
         if voice_mode:
-            await _send_audio(ws, ctx, speaker, clean, pre['audio'])
-        return _apply_utterance(state, speaker, clean)
+            await _send_audio(
+                ws, ctx, speaker, clean, pre['audio'], utterance_id=utterance_id
+            )
+        return _apply_utterance(state, speaker, clean, utterance_id=utterance_id)
 
     async def _discard(task) -> None:
         """prefetch를 폐기한다 (유저 개입 등으로 전제가 무너졌을 때)."""
@@ -1300,6 +1322,7 @@ def create_app(
         반환: (새 state, barge_text) — barge_text가 있으면 유저가 끼어든 것.
         """
         generation_id = _begin_generation(ctx)
+        utterance_id = ctx['playback_history'].begin()
         # unified(v2)는 화자를 스트림의 첫 줄(헤더)이 정한다 — 그때까지 hd가 비어 있다
         hd = {'speaker': None, 'name': None, 'sel': None}
         if unified:
@@ -1374,6 +1397,7 @@ def create_app(
                         len(emitted) > 1,
                         ctx['tts_epoch'],
                         generation_id,
+                        utterance_id,
                     )
                 )
             return True
@@ -1476,7 +1500,10 @@ def create_app(
             partial = strip_audio_tags(_strip_speaker_prefix(''.join(parts), hd['name']))
             await ws.send_json({'type': 'interrupted', 'speaker': hd['speaker'], 'text': partial})
             if partial:  # 빈 부분 발화는 이력에 남기지 않는다(프롬프트 오염 방지)
-                state = _apply_utterance(state, hd['speaker'], partial, interrupted=True)
+                state = _apply_utterance(
+                    state, hd['speaker'], partial, interrupted=True,
+                    utterance_id=utterance_id,
+                )
             return state, barge
 
         _finish_generation(ctx, generation_id)
@@ -1493,7 +1520,9 @@ def create_app(
             await ws.send_json({'type': 'error', 'speaker': hd['speaker']})
             return state, barge
         await ws.send_json({'type': 'end', 'speaker': hd['speaker'], 'text': clean})
-        return _apply_utterance(state, hd['speaker'], clean), barge
+        return _apply_utterance(
+            state, hd['speaker'], clean, utterance_id=utterance_id
+        ), barge
 
     async def _wait_user(
         ws: WebSocket, ctx: dict, timeout: float, until_acked: bool = False
@@ -1523,6 +1552,7 @@ def create_app(
                 if until_acked and _unplayed(ctx):
                     print('[pace] played ack 타임아웃 — 장부 리셋')
                     ctx['acked_seq'] = ctx['sent_seq']
+                    # 진행 대기만 해제한다. 실제 ACK 없이 재생 이력을 정리하지 않는다.
                 return None
             try:
                 ready = await asyncio.wait_for(
@@ -1572,6 +1602,7 @@ def create_app(
             'presentation_release_client_event_id': None,
             'seen_client_event_ids': set(),
             'tts_epoch': 0,
+            'playback_history': PlaybackHistory(),
             'sent_seq': 0,
             'acked_seq': 0,
             'hold_until': 0.0,
@@ -1591,6 +1622,7 @@ def create_app(
         loop = asyncio.get_event_loop()
         worker = None
         prefetch = None  # 재생 중 미리 만들어두는 다음 AI 턴
+        prefetch_revision = 0
         try:
             _record(ctx, EventName.SESSION_STARTED, metadata=runtime_metadata)
             await ws.send_json(
@@ -1598,6 +1630,7 @@ def create_app(
             )
             worker = asyncio.create_task(_tts_worker(ws, ctx['tts_queue'], ctx))
             while True:
+                state = ctx['playback_history'].apply(state)
                 user_spoke = False
                 if pending_user is not None:
                     state = _add_user(state, pending_user)
@@ -1644,10 +1677,11 @@ def create_app(
                         user_spoke = True
                         await _flush_stale(ws, ctx)
 
+                state = ctx['playback_history'].apply(state)
                 ctx['turn_id'] = f'turn-{turn + 1}'
                 finish = turn + 1 >= max_turns
-                if user_spoke:
-                    # 유저가 말함 → "침묵 전제" prefetch는 무효, 실시간 경로로 반응
+                if user_spoke or prefetch_revision != ctx['playback_history'].revision:
+                    # 새 입력이나 중단 표시로 문맥이 바뀌면 이전 사전 결과를 폐기한다.
                     await _discard(prefetch)
                     prefetch = None
                 if prefetch is not None:
@@ -1668,6 +1702,7 @@ def create_app(
                     prefetch = None
                 else:
                     state, barge = await _stream_turn(state, ws, ctx, finish=finish)
+                state = ctx['playback_history'].apply(state)
                 turn += 1
 
                 # 세션 캡이 barge보다 우선 — 마무리 턴에 끼어들어도 세션은 종료된다
@@ -1683,6 +1718,7 @@ def create_app(
                     pending_user = barge  # 개입 발화를 다음 턴에 반영(세션 이어감)
                 elif voice_mode:
                     # 방금 발화가 재생되는 동안 다음 턴을 미리 만든다 (마무리 여부 반영)
+                    prefetch_revision = ctx['playback_history'].revision
                     prefetch = asyncio.create_task(
                         _prefetch_turn(state, finish=turn + 1 >= max_turns)
                     )

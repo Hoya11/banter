@@ -1358,9 +1358,13 @@
         const clientEventId = nextClientEventId();
         suppressAudioUntilNextTurn = true;
         audioSuppressionClientEventId = clientEventId;
-        stopAudio(); // 끼어드는 순간 AI 목소리를 즉시 끊는다 (클라이언트 barge)
+        const stopped = stopAudio(performance.now(), false);
         add('user', v); // 내 발화는 로컬에서 바로 표시
-        const sent = safeSend({ type: 'say', text: v, client_event_id: clientEventId });
+        const sent = safeSend({
+          type: 'say', text: v, client_event_id: clientEventId,
+          audio_stop: stopped.audioStop,
+        });
+        if (stopped.maxSeq > 0) ack(stopped.maxSeq);
         if (sent) setStatus('대화 중, 언제든 끼어들 수 있어요.');
         input.value = '';
       };

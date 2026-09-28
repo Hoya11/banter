@@ -877,6 +877,47 @@ test('queued audio is cleared without counting it as audible stop latency', asyn
   await recordingStart;
 });
 
+test('text input reports the paused segment before acknowledging discarded audio', async () => {
+  const harness = createHarness({ performanceTimes: [20, 22] });
+  const socket = await harness.startRunning({ voice: true, stt: false });
+  socket.receive({ type: 'audio', seq: 7, speaker: 'ai_a', text: '재생 중', audio: 'YQ==', cont: false });
+  harness.audio.playCalls[1].resolve();
+  await drainMicrotasks();
+  socket.receive({ type: 'audio', seq: 8, speaker: 'ai_a', text: '다음 문장', audio: 'Yg==', cont: true });
+  harness.elements.msg.value = '잠깐만';
+
+  harness.elements.form.onsubmit({ preventDefault() {} });
+
+  const say = socket.sent.find((message) => message.type === 'say');
+  assert.deepEqual(say, {
+    type: 'say', text: '잠깐만', client_event_id: 'test-session-1',
+    audio_stop: { outcome: 'paused', elapsed_ms: 2, segment_id: 'audio-7' },
+  });
+  assert.deepEqual(socket.sent.filter((message) => message.type === 'played'), [
+    { type: 'played', seq: 8 },
+  ]);
+  assert.ok(socket.sent.indexOf(say) < socket.sent.findIndex((message) => message.type === 'played'));
+  assert.equal(harness.audio.paused, true);
+  assert.equal(harness.audio.playCalls.length, 2);
+});
+
+test('text input does not report queued audio as a paused segment', async () => {
+  const harness = createHarness();
+  const socket = await harness.startRunning({ voice: true, stt: false });
+  socket.receive({ type: 'audio', seq: 3, speaker: 'ai_a', text: '재생 대기', audio: 'YQ==', cont: false });
+  harness.elements.msg.value = '다른 이야기';
+
+  harness.elements.form.onsubmit({ preventDefault() {} });
+
+  const say = socket.sent.find((message) => message.type === 'say');
+  assert.equal(say.audio_stop.outcome, 'queued_only');
+  assert.equal(say.audio_stop.segment_id, 'audio-3');
+  harness.audio.playCalls[1].resolve();
+  await drainMicrotasks();
+  assert.deepEqual(subtitles(harness.elements.log), ['다른 이야기']);
+  assert.equal(socket.sent.filter((message) => message.type === 'played').length, 1);
+});
+
 test('a failed pause is recorded separately from successful stop latency', async () => {
   const permission = deferred();
   const harness = createHarness({

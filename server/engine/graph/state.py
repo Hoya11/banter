@@ -5,7 +5,7 @@ supervisor의 발화권 중재(§1.3)와 실패모드 가드(§1.4)의 판단 �
 """
 
 import operator
-from typing import Annotated, Literal, TypedDict
+from typing import Annotated, Literal, NotRequired, TypedDict
 
 # 발화 주체 — 유저 1명 + AI 2명(대비형 듀오)
 Speaker = Literal['user', 'ai_a', 'ai_b']
@@ -18,6 +18,7 @@ class Message(TypedDict):
     text: str
     ts: float
     interrupted: bool
+    utterance_id: NotRequired[str]  # 실시간 서버의 발화와 음성 순번 연결
 
 
 class PersonaState(TypedDict):
