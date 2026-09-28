@@ -1,8 +1,9 @@
 # engine: 3자 대화의 공통 로직과 평가
 
 사용자 1명과 AI 2명의 화자 선정, 페르소나, 발화 생성과 평가를 담당한다.
-상세 설계는 [엔진 설계 v0.1](../../docs/engine-design-v0.1.md), 현재 선택과 한계는
-[설계 결정 기록](../../docs/decisions.md)에 있다.
+현재 구조와 선택은 [문제 해결 사례](../../docs/project-walkthrough.md)와
+[설계 결정 기록](../../docs/decisions.md)에 정리. 초기 설계는
+[엔진 설계 v0.1](../../docs/engine-design-v0.1.md)에 보존.
 
 | 경로 | 현재 역할 |
 | --- | --- |

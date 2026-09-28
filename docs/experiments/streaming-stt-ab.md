@@ -9,7 +9,7 @@
   [VAD 실험 기록](vad-interruption.md#연결-생성-단계-재검증)에 남긴다.
 - 코드 경로는 가짜 공급자로 검증하며, 이 결과를 실제 성능 수치로 쓰지 않는다.
 
-이번 단계에서는 VAD와 WebRTC를 넣지 않는다. 버튼 조작, 대화 엔진, LLM, TTS는 그대로 둔다. 다만 두 모드는 전송 형식, API, STT 모델이 함께 달라진다. 따라서 결과는 파일 전사와 Realtime 전사의 전체 경로 비교로 해석하고, 차이를 스트리밍 하나의 효과라고 단정하지 않는다.
+이 비교는 push-to-talk와 WebSocket을 고정하고 VAD는 제외. 대화 엔진, LLM과 TTS 설정도 유지. 다만 두 모드는 전송 형식, API, STT 모델이 함께 달라진다. 따라서 결과는 파일 전사와 Realtime 전사의 전체 경로 비교로 해석하고, 차이를 스트리밍 하나의 효과라고 단정하지 않는다.
 
 ## 구현 방식
 
@@ -70,30 +70,38 @@ SDK나 WebSocket 라이브러리 버전을 바꿀 때 관련 회귀 테스트를
 
 ## 실행 방법
 
-기본값은 기존 방식이다.
+각 실행 예시는 프로젝트 루트 기준. 기존 `.env` 설정과 섞이지 않도록 입력 모드와 STT 모드를 명시.
 
 ```bash
 cd server
-BANTER_STT_MODE=record_then_transcribe PYTHONPATH=. uv run uvicorn api.main:app --reload
+BANTER_INTERACTION_MODE=push_to_talk BANTER_STT_MODE=record_then_transcribe \
+  PYTHONPATH=. uv run uvicorn api.main:app --reload
 ```
 
 스트리밍 방식은 명시적으로 켠다.
 
 ```bash
 cd server
-BANTER_STT_MODE=streaming_push_to_talk PYTHONPATH=. uv run uvicorn api.main:app --reload
+BANTER_INTERACTION_MODE=push_to_talk BANTER_STT_MODE=streaming_push_to_talk \
+  PYTHONPATH=. uv run uvicorn api.main:app --reload
 ```
 
-측정할 때는 방식마다 새 로그 파일을 사용한다. 로그는 기존 파일에 이어 쓰므로, 다시 비교할 때는 날짜나 실행 ID를 붙인 사용하지 않은 경로로 바꾼다.
+측정 명령과 요약 명령은 `server`에서 실행. 방식별 서버를 종료한 뒤 다음 방식 실행. 로그는 기존 파일에 이어 쓰므로, 매 측정에 날짜나 실행 ID를 붙인 새 경로 사용.
 
 ```bash
-BANTER_EVENT_LOG=artifacts/runs/stt-file.jsonl BANTER_STT_MODE=record_then_transcribe PYTHONPATH=. uv run uvicorn api.main:app
-BANTER_EVENT_LOG=artifacts/runs/stt-stream.jsonl BANTER_STT_MODE=streaming_push_to_talk PYTHONPATH=. uv run uvicorn api.main:app
+# 파일 전사
+BANTER_EVENT_LOG=artifacts/runs/stt-file.jsonl \
+  BANTER_INTERACTION_MODE=push_to_talk BANTER_STT_MODE=record_then_transcribe \
+  PYTHONPATH=. uv run uvicorn api.main:app
+# 스트리밍 전사
+BANTER_EVENT_LOG=artifacts/runs/stt-stream.jsonl \
+  BANTER_INTERACTION_MODE=push_to_talk BANTER_STT_MODE=streaming_push_to_talk \
+  PYTHONPATH=. uv run uvicorn api.main:app
 PYTHONPATH=. uv run python scripts/summarize_stt.py artifacts/runs/stt-file.jsonl --skip-first 3
 PYTHONPATH=. uv run python scripts/summarize_stt.py artifacts/runs/stt-stream.jsonl --skip-first 3
 ```
 
-각 서버를 한 번만 실행한 채 준비 3회와 측정 20회를 연속으로 진행한다. 같은 프로세스를 유지해야 준비 실행에서 만든 연결 상태가 측정에도 이어진다. 로그에는 방식별로 총 23개 표본이 남고, 요약할 때 `--skip-first 3`으로 앞의 준비 표본을 제외한다. 결과의 `total_count`, `skipped_warmup_count`, `count`로 제외 범위를 확인한다.
+각 방식은 같은 서버 프로세스에서 준비 3회 후 측정 20회 진행. Realtime 전사 연결은 발화마다 새로 생성하며 연결 준비 지연도 측정에 포함. 로그의 총 23개 표본 중 준비 3회는 `--skip-first 3`으로 제외하고, `total_count`, `skipped_warmup_count`, `count`로 집계 확인.
 
 `baseline-push-to-talk-v1` 태그는 이전 코드 상태를 보존하는 기준점이다. 실제 A/B 측정은 현재 코드에서 환경 변수만 바꾸는 편이 좋다. 이렇게 하면 브라우저 관측 방식과 로그 형식이 두 방식에서 같아진다.
 
@@ -124,7 +132,7 @@ PYTHONPATH=. uv run python scripts/summarize_stt.py artifacts/runs/stt-stream.js
 
 ## 실제 호출 전 확인
 
-`gpt-live-transcribe`는 현재 Free tier를 지원하지 않는다. 실제 측정 전 유료 API 프로젝트, 결제 상태, 지출 상한을 먼저 확인한다. API key는 `server/.env`에만 두고 Git에 넣지 않는다.
+실제 측정 전 해당 모델의 사용 가능 여부, 계정의 결제 상태와 지출 상한 확인. 모델 지원 범위는 아래 공식 모델 정보 참고. API 키는 환경변수 또는 Git에서 제외된 `server/.env`로 설정.
 
 - [OpenAI Realtime transcription 가이드](https://developers.openai.com/api/docs/guides/realtime-transcription)
 - [gpt-live-transcribe 모델 정보](https://developers.openai.com/api/docs/models/gpt-live-transcribe)

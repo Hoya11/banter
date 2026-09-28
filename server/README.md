@@ -54,7 +54,7 @@ PYTHONPATH=. uv run python scripts/check_stt_connection.py
 
 현재 `api/app.py`에 연결 처리와 여러 대화 상태의 제어가 집중돼 있다. 미완료 사전 생성
 대기의 입력 지연은 수정했으며, [별도 회귀](tests/test_prefetch.py)로 입력과 완료의 경합 및
-취소를 확인한다. 이 회귀를 유지하며 세션 제어의 책임을 정리하는 것이 다음 범위다.
+취소를 확인한다. 세션 제어의 책임 분리는 실환경 검증 이후의 개선 후보.
 [재현과 후속 계획](../docs/phase-3-plan.md#다음-개발-범위)
 
 대화 상태는 메모리에 보관하며 서버 재시작 후 세션 복원을 제공하지 않는다. WebRTC나
