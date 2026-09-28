@@ -6,8 +6,8 @@
 - 음성 동기(voice mode): 소리가 주인공. 발화 텍스트는 FE가 오디오 재생 시점에
   표시하고(자막), FE의 played ack을 받아야 다음 라디오 턴을 진행한다.
 - prefetch: 현재 발화가 재생되는 동안 다음 AI 턴의 화자 선정, 대사, 합성을
-  백그라운드로 완성해 둔다. AI끼리의 티키타카는 체감 지연이 0에 수렴한다.
-  유저가 개입하면 폐기하고 실시간 경로로 반응한다.
+  백그라운드로 준비해 재생 시간과 다음 턴 준비 시간을 겹친다.
+  준비를 기다리는 동안에도 입력을 받고, 새 사용자 발화가 확정되면 폐기한다.
 
 재생 페이스는 seq 장부로 맞춘다: audio 이벤트마다 단조 증가 seq를 붙이고
 FE는 {played, seq}로 응답한다. 서버는 acked=max(acked, seq)만 기억하므로
@@ -1232,7 +1232,7 @@ def create_app(
 
         트레이드오프: 이 턴은 스트리밍이 없어 서버측 barge-in이 불가하다.
         유저 개입은 FE의 재생 중단 + 다음 턴 반영으로 처리되며, 이력에는
-        완주로 남는다. 끊긴 지점 기록은 실시간 경로에서만 정확하다.
+        완주로 남는다. 실시간 경로도 생성된 텍스트 기준이며 실제 청취 위치는 아니다.
         """
         state = {**state, **pre['sel']}
         speaker, clean = pre['speaker'], pre['clean']
@@ -1260,6 +1260,39 @@ def create_app(
             await task
         except (asyncio.CancelledError, Exception):
             pass
+
+    async def _wait_prefetch(
+        ws: WebSocket, ctx: dict, prefetch: asyncio.Task
+    ) -> tuple[str, object]:
+        """사전 생성과 사용자 입력을 함께 기다리며 동시 완료 시 입력을 우선한다.
+
+        진입 전 hold 대기에서 전사 요청은 해소된다. 새 hold를 받으면 호출자로
+        돌아가므로 이후 음성 청크와 전사 완료는 기존 수신 경로가 처리한다.
+        """
+        while True:
+            receive_task = asyncio.create_task(ws.receive_text())
+            try:
+                await asyncio.wait(
+                    {prefetch, receive_task}, return_when=asyncio.FIRST_COMPLETED
+                )
+                if not receive_task.done():
+                    receive_task.cancel()
+                try:
+                    # 준비 완료와 수신이 겹치거나 취소 중 입력을 반환해도 보존한다.
+                    raw = await receive_task
+                except asyncio.CancelledError:
+                    if asyncio.current_task().cancelling():
+                        raise
+                    return 'prefetch', None
+                if asyncio.current_task().cancelling():
+                    raise asyncio.CancelledError
+                kind, value = await _incoming(ws, ctx, raw)
+                if kind in {'say', 'hold'}:
+                    return kind, value
+                if kind == 'played':
+                    _on_ack(ctx, value)
+            finally:
+                await _discard(receive_task)
 
     async def _stream_turn(state: dict, ws: WebSocket, ctx: dict, finish: bool = False):
         """한 AI 발화를 스트리밍하되, 도중 유저 개입이 오면 취소(barge-in)한다.
@@ -1618,9 +1651,14 @@ def create_app(
                     await _discard(prefetch)
                     prefetch = None
                 if prefetch is not None:
-                    # prefetch 히트 — 완성품을 즉시 방출 (지연 은폐)
+                    kind, value = await _wait_prefetch(ws, ctx, prefetch)
+                    if kind == 'say':
+                        pending_user = value
+                        continue
+                    if kind == 'hold':
+                        continue  # 턴을 소모하지 않고 기존 전사 대기로 돌아간다.
                     try:
-                        pre = await prefetch
+                        pre = prefetch.result()
                         state = await _commit_prefetched(state, ws, ctx, pre)
                         barge = None
                     except WebSocketDisconnect:
