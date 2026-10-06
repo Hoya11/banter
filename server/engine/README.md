@@ -22,7 +22,7 @@ v2 헤더 오류 시에는 추가 supervisor 호출 없이 기계적으로 화�
 평가 방식은 [평가 하네스 설명](eval/README.md)을 참고한다.
 
 현재 전송은 WebSocket이며, 브라우저 VAD는 push-to-talk와 별도로 선택하는 옵션이다.
-LiveKit agent worker로의 분리는 필수 이행 단계로 정하지 않는다. 실제 측정에서 전송 지연,
-지터나 에코가 병목으로 확인되면 WebRTC 또는 LiveKit을 검토한다. 그 전에는 현재 경로의
+WebRTC 또는 LiveKit은 실제 측정에서 전송 지연, 지터나 에코가 병목으로 확인될 때
+검토할 후속 대안이다. 우선 현재 경로의
 끼어들기 품질과 오류 복구를 검증하고, [실험 기록](../../docs/experiments/README.md)에
 관찰과 한계를 남긴다.

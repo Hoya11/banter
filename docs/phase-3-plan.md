@@ -26,7 +26,7 @@
 
 측정 전 결제 상태, 지출 상한, 키 설정 여부와 호출할 세션·발화 수 확인.
 감지 시점과 실제 발화 시점, 브라우저 pause 적용과 실제 출력 중단은 각각 별도 지표로 기록.
-모의 시간과 테스트 성공 건수는 실제 지연·정확도 수치로 사용하지 않음.
+자동 테스트는 상태 전이와 오류 복구를 검증. 실제 음성 지연·정확도는 별도 측정 대상.
 
 [PTT 기준 측정](experiments/push-to-talk-baseline.md) / [STT 비교](experiments/streaming-stt-ab.md) / [VAD 비교](experiments/vad-interruption.md)
 
